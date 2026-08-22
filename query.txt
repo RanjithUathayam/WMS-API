@@ -1,0 +1,110 @@
+<------------ Add Ons ------------->
+1)Add IsDelete Column to master table for dynamic table (IsDelete int (0,1))
+2)Add Table for Api_Log (create query in below lines )
+3)Create Table of RightsMenuList(query in below)
+4)Add Column In User_Management(Rights VARCHAR(MAX))
+
+
+[sequelize.literal('FORMAT(PartWt, \'N2\')'), 'PartWt'],
+[sequelize.literal('(select case when(select EquipmentNo )=0 then \'\' else EquipmentNo end)'), 'CraneID'],
+
+
+select 
+distinct EquipmentNo,PartNo,PartName,'',BatchNo,
+(select SUM(Loc.Quantity) from LocationSpecification Loc where Loc.PartNo=l.PartNo and Loc.PartName=l.PartName and Loc.BatchNo=l.BatchNo and Error=0 and PickDelPoint=0 and Blocked=0) as qty,
+(select COUNT(Loc.PalletID) from LocationSpecification Loc where l.PartNo=Loc.PartNo and l.PartName=Loc.PartName and Loc.BatchNo=l.BatchNo and Loc.Quantity>0 and Error=0 and PickDelPoint=0 and Blocked=0 and Loc.PalletID not in  (select PRD.PalletID from PalletRequestDetails PRD where Status not in ('C','E','R','D'))) as tot_qty,
+CAST(0 as real) 
+from LocationSpecification L
+where PartNo!='' and PartNo is not NULL and PartName!='' and PartName is not NULL and Quantity>0
+
+
+---Occupied Calculation + Pallet In & Out,Bay Count---
+{
+SELECT TotalPalletLoc,OccupiedPalletLoc,FreeLoc,ErrorLocWPallet,ErrorLocWOPallet,(OccupiedPalletLoc*100)/TotalPalletLoc  as sumTotal,TotalLoad,TodayInward,TodayOutward,TIw,TOw,totBayCounts
+FROM
+    (SELECT COUNT(*) as TotalPalletLoc FROM LocationSpecification WHERE PickDelPoint = 0) AS TotalPalletLoc,
+    (SELECT COUNT(*) as OccupiedPalletLoc FROM LocationSpecification WHERE PickDelPoint = 0 AND PalletID != '') AS occPlt,
+	(select COUNT(*) as FreeLoc from LocationSpecification where PickDelPoint=0 and Blocked=0 and Error=0 and  PalletID is  NULL ) AS FreeLoc,
+	(select COUNT(*) as ErrorLocWPallet from LocationSpecification where Error=1 and PickDelPoint=0 and Blocked=0 and ( PalletID!='' or PalletID is not NULL )) AS ErrorLocWPallet,
+	(select COUNT(*) as ErrorLocWOPallet from LocationSpecification where Error=1 and PickDelPoint=0 and Blocked=0 and ( PalletID ='' or PalletID is  NULL )) AS ErrorLocWOPallet,
+	(select SUM( PalletWeight) as TotalLoad from LocationSpecification where PickDelPoint=0 and Blocked=0 and Quantity>0 and PalletID!='' and PalletID is not NULL) AS TotalLoad,
+	(select COUNT(PalletId) as TodayInward from Tbl_PalletCall where Type='Load'  and CONVERT(date,Createddate) >= convert(date,DATEADD(DAY,0,GETDATE()))) AS TodayInward,
+	(select COUNT(PalletId) as TodayOutward from Tbl_PalletCall where Type='Unload'  and CONVERT(date,Createddate) >= convert(date,DATEADD(DAY,0,GETDATE()))) AS TodayOutward,
+	(select SUM(GrossWeight) as TIw from Inv_PalletDetails_Transaction where InQuantity>0  and CONVERT(date,UpdatedDate) >= convert(date,DATEADD(DAY,0,GETDATE()))) AS TIw,
+	(select SUM(GrossWeight) as TOw from Inv_PalletDetails_Transaction where OutQuantity>0  and CONVERT(date,UpdatedDate) >= convert(date,DATEADD(DAY,0,GETDATE()))) AS TOw,
+	(SELECT COUNT(*) AS totBayCounts FROM (SELECT DISTINCT Side, Level, Bay FROM LocationSpecification WHERE Blocked = 0 AND PickDelPoint = 0 ) AS subquery) AS totBayCounts;
+
+
+
+--Empty Bay Calculation--
+SELECT count(BayCount)
+FROM (
+    SELECT LS.Side,LS.Level,LS.Bay,COUNT(LS.Deep) AS deep,
+        (SELECT COUNT(Bay) FROM [LocationSpecification] WHERE PalletID IS NOT NULL AND PickDelPoint = 0 AND Bay = LS.Bay AND Side = LS.Side AND Level = LS.Level) AS BayCount
+    FROM LocationSpecification AS LS WHERE  LS.PickDelPoint = 0  GROUP BY LS.Bay,LS.Side,LS.Level
+) AS sub
+WHERE (SELECT COUNT(Bay) FROM [LocationSpecification] WHERE PalletID IS NOT NULL AND PickDelPoint = 0 AND Bay = sub.Bay AND Side = sub.Side AND Level = sub.Level)=0;
+}
+
+
+RKG-SP_MaterialTracking - Method user (load,SearchMT) @ Item Transaction
+RKG-SP_CallHistory - Method (PalletIDLoad,Serach) @ Storage Reterival 
+RKG-SP_CalculateOccupiedPerc - Type (Location Summary,Crane-All) @ Dashboard Occupied Calculation
+
+
+
+
+CREATE TABLE api_logs (
+  id INT PRIMARY KEY IDENTITY,
+  method NVARCHAR(255) NOT NULL,
+  url NVARCHAR(255) NOT NULL,
+  moduleName NVARCHAR(255) NOT NULL,
+  queryParameters NVARCHAR(MAX),
+  body NVARCHAR(MAX),
+  userID NVARCHAR(255) NOT NULL,
+  statusCode INT NOT NULL,
+  duration INT NOT NULL,
+  createdAt DATETIME NOT NULL DEFAULT GETDATE()
+);
+
+CREATE INDEX module_name_index ON api_logs (moduleName);
+CREATE INDEX url_index ON api_logs (url);
+CREATE INDEX method_index ON api_logs (method);
+
+
+CREATE TABLE RightsMenuList (
+  id INT PRIMARY KEY IDENTITY,
+  module NVARCHAR(255) NOT NULL,
+  sub_module NVARCHAR(255) NOT NULL,
+  lists NVARCHAR(5) NOT NULL,
+  creates NVARCHAR(5) NOT NULL,
+  modifies NVARCHAR(5) NOT NULL,
+  deletes NVARCHAR(5) NOT NULL,
+  exports NVARCHAR(5) NOT NULL,
+  pattern NVARCHAR(50) NOT NULL,
+  IsDelete INT NOT NULL,
+  createdAt DATETIME NOT NULL DEFAULT GETDATE()
+);
+
+
+INSERT INTO RightsMenuList (module,sub_module,lists,creates,modifies,deletes,exports,pattern,IsDelete) VALUES
+('Master','Item Master','1','1','1','1','1','item_master',0),
+('Master','Item Group','1','1','1','1','1','item_master_group',0),
+('Master','UOM','1','1','1','1','1','uom_master',0),
+('Master','Pallet','1','1','1','1','1','pallet_master',0),
+('Transaction','Item','1','0','0','0','1','item_transaction',0),
+('Transaction','Pallet Request','1','0','0','0','1','pallet_request',0),
+('Transaction','Stock Adjustment','1','0','1','0','1','stock_adjustment',0),
+('History','Storage / Retrieval','1','0','0','0','1','storage_retrival',0),
+('History','Alarm','1','0','0','0','1','alarm_history',0),
+('History','Rejected Pallet','1','0','0','0','1','rejected_pallet_history',0),
+('History','Maintenance','1','0','0','0','1','maintenance_history',0),
+('History','Expiry','1','0','0','0','1','expiry_history',0),
+('History','User Log','1','0','0','0','1','user_log_history',0),
+('Inventory','Item Inventory','1','0','0','0','1','item_inventory',0),
+('Inventory','Pallet Inventory','1','0','0','0','1','pallet_inventory',0),
+('Status','Location Status','1','0','0','0','1','location_status',0),
+('Status','Equipment Status','1','0','0','0','1','equipment_status',0),
+('User','User','1','1','1','1','1','user_master',0),
+('User','User Group','1','1','1','1','1','user_group',0),
+('User','User Rights','1','0','1','0','0','user_rights',0);
