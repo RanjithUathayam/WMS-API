@@ -76,7 +76,11 @@ const BinningComplete = sequelize.define('T_BINCOMPLETE', {
     scannedItem:{
         type: DataTypes.STRING,
         allowNull: true
-    },   
+    },
+    WhsCode: {
+        type: DataTypes.STRING,
+        allowNull: true
+    },
 }, {
     tableName: 'T_BIN_COMPLETE',
     timestamps: false,

@@ -15,6 +15,7 @@ const palletRequest = require('./models/operation/storage');
 const ERPRetrieval = require('./models/ERP_API/BinRetrieval')
 const ERPRouter = require('./routes/ERPRoutes')
 const HHTRouter = require('./routes/HHTRouter')
+const preBinningRoutes = require('./routes/preBinningRoutes')
 const { sequelize } = require('./config/database');
 const KEPGroundConveyorStatus = require('./models/operation/KEPGroundConveyorStatus');
 const RetrievalConfirmation = require('./models/operation/RetrievalConfirmation');
@@ -59,6 +60,7 @@ app.use('/api/status', authenticateToken, statusRoutes);
 app.use('/api/ERP', authenticateToken, ERPRouter)
 app.use('/api/HHT',authenticateToken, HHTRouter)
 app.use('/api/config',authenticateToken, configRouter)
+app.use('/api/pre-binning', authenticateToken, preBinningRoutes)
 
 //Data Clean
 // cron.schedule('0 0 * * *', async () => {  

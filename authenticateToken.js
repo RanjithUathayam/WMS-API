@@ -70,6 +70,17 @@ const authenticateToken = async (req, res, next) => {
     { endpoint: '/getBinDetailsForRefilling',pattern:'preBinning_list', moduleName:'GRN Item Complete', type:'add' },
     { endpoint: '/updateRefilledBin',pattern:'preBinning_creates', moduleName:'GRN Item Complete', type:'add' },
     { endpoint: '/updateStock',pattern:'preBinning_creates', moduleName:'GRN Item Complete', type:'add' },
+
+    // Pre-Binning box process (routes/preBinningRoutes.js, mounted at /api/pre-binning).
+    // checkPermission() below only keys off the first path segment after the router's baseUrl, so
+    // /box/validate, /box/complete and /box/:boxNumber/items all share this one '/box' entry.
+    { endpoint: '/warehouses',pattern:'preBinning_list', moduleName: 'Pre-Binning Warehouses', type:'List' },
+    { endpoint: '/warehouse-stock',pattern:'preBinning_list', moduleName: 'Pre-Binning Warehouse Stock', type:'List' },
+    { endpoint: '/box',pattern:'preBinning_creates', moduleName: 'Pre-Binning Box', type:'add' },
+    // NOTE: no entry added here for POST /item/scan — '/item' already exists below for
+    // GET /api/transaction/item (Item Inventory List) and the two would collide (same first
+    // segment). It intentionally falls through to that entry's 'transaction_item_list' pattern;
+    // see the summary note to the team about this shared-name limitation in checkPermission().
  
  
 
