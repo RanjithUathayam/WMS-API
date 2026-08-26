@@ -241,8 +241,8 @@ async function insertScannedItem(transaction, item) {
         });
     } catch (error) {
         if (isUniqueViolation(error)) {
-            const duplicateError = new Error(`Unique Number ${item.uniqueNumber} has already been scanned for item ${item.itemCode}.`);
-            duplicateError.code = 'DUPLICATE_UNIQUE_NUMBER';
+            const duplicateError = new Error(`Unique Number ${item.uniqueNumber} for item ${item.itemCode} has already been scanned.`);
+            duplicateError.code = 'DUPLICATE_ITEM_UNIQUE_NUMBER';
             throw duplicateError;
         }
         throw error;

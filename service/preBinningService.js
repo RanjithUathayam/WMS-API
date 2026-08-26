@@ -177,8 +177,9 @@ async function scanItemAsync(rawRequest, user) {
         }
 
         // 4 — Unique number (scoped to this ItemCode, not global — the same number can recur under a different item)
+        
         if (await repository.uniqueNumberExists(transaction, request.itemCode, request.uniqueNumber)) {
-            throw new PreBinningError('DUPLICATE_UNIQUE_NUMBER', `Unique Number ${request.uniqueNumber} has already been scanned for item ${request.itemCode}.`);
+            throw new PreBinningError('DUPLICATE_ITEM_UNIQUE_NUMBER', `Unique Number ${request.uniqueNumber} for item ${request.itemCode} has already been scanned.`);
         }
 
         // 5 — Box item group
@@ -189,7 +190,7 @@ async function scanItemAsync(rawRequest, user) {
         // Extra quantity — informational only, never blocks the scan (warehouse qty is display-only).
         const warehouseAvailableQty = Number(stock.OnHand);
         const extraQty = Math.max(0, request.qty - warehouseAvailableQty);
-
+        
         // Persist — create/update box, insert item, update box total, still inside this transaction.
         if (!box) {
             try {
