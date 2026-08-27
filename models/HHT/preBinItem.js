@@ -23,6 +23,10 @@ const PreBinItem = sequelize.define('T_PREBIN_ITEM', {
         type: DataTypes.STRING,
         allowNull: true
     },
+    GRNNo: {
+        type: DataTypes.STRING,
+        allowNull: false
+    },
     ItemGroup: {
         type: DataTypes.STRING,
         allowNull: false
@@ -53,7 +57,7 @@ const PreBinItem = sequelize.define('T_PREBIN_ITEM', {
         },
         {
             unique: true,
-            fields: ['ItemCode', 'UniqueNumber']
+            fields: ['ItemCode', 'GRNNo', 'UniqueNumber']
         },
         {
             fields: ['WarehouseCode', 'ItemCode']

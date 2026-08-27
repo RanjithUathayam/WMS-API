@@ -181,14 +181,15 @@ async function findGrnForItem(transaction, itemCode, itemGroup) {
     return rows[0] || null;
 }
 
-/** Unique Number only has to be unique within its ItemCode, not globally across all items. */
-async function uniqueNumberExists(transaction, itemCode, uniqueNumber) {
+/** Unique Number only has to be unique within its ItemCode + GRNNo, not globally across all items
+ *  or GRNs — the same number legitimately recurs for the same ItemCode under a different GRN. */
+async function uniqueNumberExists(transaction, itemCode, grnNo, uniqueNumber) {
     const rows = await sequelize.query(`
         SELECT TOP 1 1 AS found
         FROM T_PREBIN_ITEM WITH (UPDLOCK, HOLDLOCK)
-        WHERE ItemCode = :itemCode AND UniqueNumber = :uniqueNumber
+        WHERE ItemCode = :itemCode AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
     `, {
-        replacements: { itemCode, uniqueNumber },
+        replacements: { itemCode, grnNo, uniqueNumber },
         transaction,
         type: QueryTypes.SELECT
     });
@@ -223,14 +224,15 @@ async function setBoxItemGroup(transaction, preBinBoxID, itemGroup) {
 async function insertScannedItem(transaction, item) {
     try {
         await sequelize.query(`
-            INSERT INTO T_PREBIN_ITEM (PreBinBoxID, WarehouseCode, ItemCode, Type, ItemGroup, UniqueNumber, Qty, ScannedBy, ScannedAt)
-            VALUES (:preBinBoxID, :warehouseCode, :itemCode, :type, :itemGroup, :uniqueNumber, :qty, :scannedBy, GETDATE())
+            INSERT INTO T_PREBIN_ITEM (PreBinBoxID, WarehouseCode, ItemCode, Type, GRNNo, ItemGroup, UniqueNumber, Qty, ScannedBy, ScannedAt)
+            VALUES (:preBinBoxID, :warehouseCode, :itemCode, :type, :grnNo, :itemGroup, :uniqueNumber, :qty, :scannedBy, GETDATE())
         `, {
             replacements: {
                 preBinBoxID: item.preBinBoxID,
                 warehouseCode: item.warehouseCode,
                 itemCode: item.itemCode,
                 type: item.type,
+                grnNo: item.grnNo,
                 itemGroup: item.itemGroup,
                 uniqueNumber: item.uniqueNumber,
                 qty: item.qty,
@@ -241,7 +243,7 @@ async function insertScannedItem(transaction, item) {
         });
     } catch (error) {
         if (isUniqueViolation(error)) {
-            const duplicateError = new Error(`Unique Number ${item.uniqueNumber} for item ${item.itemCode} has already been scanned.`);
+            const duplicateError = new Error(`Unique Number ${item.uniqueNumber} for item ${item.itemCode} in GRN ${item.grnNo} has already been scanned.`);
             duplicateError.code = 'DUPLICATE_ITEM_UNIQUE_NUMBER';
             throw duplicateError;
         }

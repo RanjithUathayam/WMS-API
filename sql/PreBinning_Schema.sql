@@ -10,11 +10,12 @@
             -> Live warehouse stock. See repository/preBinningRepository.js: getWarehouseStock,
                getPreBinningWarehouses, and the per-scan stock lock all read these directly.
       - [dbo].[ERP_Pre_Binning]  (Sequelize model: models/ERP_API/PreBinning.js)
-            -> Reference only, and only at box completion. GRNNo is parsed off the item QR for the
-               Item Scan response, but it is NOT validated during scanning and NOT stored on
-               T_PREBIN_ITEM at all. At box completion, repository.findGrnForItem resolves the best
-               matching ERP_Pre_Binning row by ItemCode + ItemGroup to populate T_BIN_COMPLETE's
-               (NOT NULL) GRNNo column — ambiguous if an item legitimately spans multiple open GRNs.
+            -> Reference only, and only at box completion. GRNNo is parsed off the item QR and IS
+               stored on T_PREBIN_ITEM (part of the scan's duplicate identity, see decision 1 below),
+               but it is not validated against ERP_Pre_Binning during scanning. At box completion,
+               repository.findGrnForItem separately resolves the best matching ERP_Pre_Binning row by
+               ItemCode + ItemGroup to populate T_BIN_COMPLETE's (NOT NULL) GRNNo column — ambiguous
+               if an item legitimately spans multiple open GRNs.
       - [dbo].[T_BIN_COMPLETE]   (Sequelize model: models/HHT/binComplete.js)
             -> Final bin-completion record, written once per box on CompleteBoxAsync. WhsCode is
                added below (nullable, for backward compatibility with pre-existing rows).
@@ -24,8 +25,11 @@
       - T_PREBIN_ITEM — one row per scanned unit inside a box
 
     Design decisions (confirm with the business if these assumptions are wrong):
-      1. UniqueNumber only has to be unique within its ItemCode (UX_PREBIN_ITEM_ITEMCODE_UNIQUE),
-         not globally — the same UniqueNumber value may recur under a different ItemCode.
+      1. UniqueNumber only has to be unique within its ItemCode + GRNNo (UX_PREBIN_ITEM_ITEMCODE_UNIQUE),
+         not globally — the same UniqueNumber value may recur under a different ItemCode, and also
+         recurs across GRNs for the SAME ItemCode (the printed tag's running number restarts per GRN
+         batch), so GRNNo must be part of the uniqueness scope or genuinely distinct pieces from a
+         later GRN get rejected as already-scanned.
       2. A BoxNumber is single-use for its whole lifetime: once a box is COMPLETED it can never be
          reopened or reused (repository.lockLatestBoxByNumber/findLatestBoxByNumber enforce this in
          application code). The unique index below only needs to cover the IN_PROGRESS state — it
@@ -60,6 +64,7 @@ BEGIN
         WarehouseCode   NVARCHAR(50)    NOT NULL,
         ItemCode        NVARCHAR(100)   NOT NULL,
         Type            NVARCHAR(50)    NULL,
+        GRNNo           NVARCHAR(100)   NOT NULL,
         ItemGroup       NVARCHAR(100)   NOT NULL,
         UniqueNumber    NVARCHAR(100)   NOT NULL,
         Qty             DECIMAL(18,3)   NOT NULL,
@@ -85,19 +90,13 @@ BEGIN
 END
 GO
 
-IF COL_LENGTH('dbo.T_PREBIN_ITEM', 'GRNNo') IS NOT NULL
+IF COL_LENGTH('dbo.T_PREBIN_ITEM', 'GRNNo') IS NULL
 BEGIN
-    -- GRNNo is no longer stored per scan (see findGrnForItem) — drop any index referencing it first.
-    DECLARE @dropGrnIndexSql NVARCHAR(MAX) = N'';
-    SELECT @dropGrnIndexSql = @dropGrnIndexSql + N'DROP INDEX ' + QUOTENAME(i.name) + N' ON dbo.T_PREBIN_ITEM;' + CHAR(10)
-    FROM sys.indexes i
-    JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id
-    JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id
-    WHERE i.object_id = OBJECT_ID('dbo.T_PREBIN_ITEM') AND c.name = 'GRNNo';
-
-    IF @dropGrnIndexSql <> N'' EXEC sp_executesql @dropGrnIndexSql;
-
-    ALTER TABLE dbo.T_PREBIN_ITEM DROP COLUMN GRNNo;
+    -- GRNNo is now part of the scan's duplicate-identity (UniqueNumber only has to be unique within
+    -- a GRN, not across GRNs — see decision 1 above), so it has to be stored per scanned row.
+    -- Pre-existing rows (scanned before this change) predate GRN tracking and get '' as a backfill.
+    ALTER TABLE dbo.T_PREBIN_ITEM
+        ADD GRNNo NVARCHAR(100) NOT NULL CONSTRAINT DF_PREBIN_ITEM_GRNNO DEFAULT '';
 END
 GO
 
@@ -146,10 +145,20 @@ IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_PREBIN_ITEM_UNIQUE_NUMBER'
     DROP INDEX UX_PREBIN_ITEM_UNIQUE_NUMBER ON dbo.T_PREBIN_ITEM;
 GO
 
+-- Upgrading from the earlier (ItemCode, UniqueNumber) version of this index — GRNNo is now part of
+-- the scope, since UniqueNumber only has to be unique within a single GRN (see decision 1 above).
+IF EXISTS (
+    SELECT 1 FROM sys.indexes i
+    WHERE i.name = 'UX_PREBIN_ITEM_ITEMCODE_UNIQUE' AND i.object_id = OBJECT_ID('dbo.T_PREBIN_ITEM')
+      AND (SELECT COUNT(*) FROM sys.index_columns ic WHERE ic.object_id = i.object_id AND ic.index_id = i.index_id) < 3
+)
+    DROP INDEX UX_PREBIN_ITEM_ITEMCODE_UNIQUE ON dbo.T_PREBIN_ITEM;
+GO
+
 -- Enforced at the DB level so two concurrent scans can never both accept the same UniqueNumber
--- for the same ItemCode (the same number may recur under a different ItemCode).
+-- for the same ItemCode + GRNNo (the same number may recur under a different ItemCode or GRN).
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_PREBIN_ITEM_ITEMCODE_UNIQUE' AND object_id = OBJECT_ID('dbo.T_PREBIN_ITEM'))
-    CREATE UNIQUE INDEX UX_PREBIN_ITEM_ITEMCODE_UNIQUE ON dbo.T_PREBIN_ITEM(ItemCode, UniqueNumber);
+    CREATE UNIQUE INDEX UX_PREBIN_ITEM_ITEMCODE_UNIQUE ON dbo.T_PREBIN_ITEM(ItemCode, GRNNo, UniqueNumber);
 GO
 
 -- Covers the balance check against live SAP stock (identity = WhsCode + ItemCode).

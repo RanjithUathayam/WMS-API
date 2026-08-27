@@ -153,9 +153,10 @@ async function validateBoxAsync({ boxQr, whsCode }) {
 }
 
 /**
- * GRNNo is parsed off the QR and stored on the row, but is deliberately NOT validated here — the
- * stock identity for Item Scan is WhsCode + ItemCode only. GRN is looked up later, at box
- * completion only, as reference data for the T_BIN_COMPLETE mirror (see completeBoxAsync).
+ * GRNNo is parsed off the QR and stored on the row. It's not validated against ERP_Pre_Binning
+ * during scanning (stock identity for Item Scan stays WhsCode + ItemCode only), but it IS part of
+ * the duplicate-scan identity: UniqueNumber is only unique within a single GRN batch, so the same
+ * UniqueNumber legitimately recurs for the same ItemCode under a different GRNNo (see step 4).
  */
 async function scanItemAsync(rawRequest, user) {
     const request = validateScanRequest(rawRequest);
@@ -176,10 +177,9 @@ async function scanItemAsync(rawRequest, user) {
             throw new PreBinningError('ITEM_NOT_AVAILABLE', `Item ${request.itemCode} is not available in warehouse ${request.whsCode}.`);
         }
 
-        // 4 — Unique number (scoped to this ItemCode, not global — the same number can recur under a different item)
-        
-        if (await repository.uniqueNumberExists(transaction, request.itemCode, request.uniqueNumber)) {
-            throw new PreBinningError('DUPLICATE_ITEM_UNIQUE_NUMBER', `Unique Number ${request.uniqueNumber} for item ${request.itemCode} has already been scanned.`);
+        // 4 — Unique number (scoped to ItemCode + GRNNo — the same number can recur under a different item or GRN)
+        if (await repository.uniqueNumberExists(transaction, request.itemCode, request.grnNo, request.uniqueNumber)) {
+            throw new PreBinningError('DUPLICATE_ITEM_UNIQUE_NUMBER', `Unique Number ${request.uniqueNumber} for item ${request.itemCode} in GRN ${request.grnNo} has already been scanned.`);
         }
 
         // 5 — Box item group
@@ -214,12 +214,12 @@ async function scanItemAsync(rawRequest, user) {
             await repository.setBoxItemGroup(transaction, box.PreBinBoxID, request.itemGroup);
         }
 
-        // GRNNo is not persisted on T_PREBIN_ITEM (see completeBoxAsync for how it's resolved later).
         await repository.insertScannedItem(transaction, {
             preBinBoxID: box.PreBinBoxID,
             warehouseCode: request.whsCode,
             itemCode: request.itemCode,
             type: request.type,
+            grnNo: request.grnNo,
             itemGroup: request.itemGroup,
             uniqueNumber: request.uniqueNumber,
             qty: request.qty,
