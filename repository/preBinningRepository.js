@@ -322,16 +322,24 @@ async function getItemCountForBox(transaction, preBinBoxID) {
     return Number(rows[0].cnt);
 }
 
-/** One row per ItemCode/ItemGroup in the box, with the scanned unique numbers grouped in. */
+/**
+ * One row per ItemCode/ItemGroup in the box, with the scanned unique numbers grouped in.
+ * Grouped by ItemCode + ItemGroup ONLY (not Type) — T_BIN_COMPLETE's real primary key is
+ * (BinID, GRNNo, ItemCode), and findGrnForItem resolves the same GRNNo for a given
+ * ItemCode + ItemGroup regardless of Type. Grouping by Type as well would emit two INSERTs
+ * with the same (BinID, GRNNo, ItemCode) whenever an item is scanned under two Types in the
+ * same box, violating that primary key.
+ */
 async function getBoxItemsGroupedForCompletion(transaction, preBinBoxID) {
     return sequelize.query(`
         SELECT
-            i.ItemCode, i.ItemGroup, i.Type,
+            i.ItemCode, i.ItemGroup,
+            MAX(i.Type) AS Type,
             CAST(SUM(i.Qty) AS DECIMAL(18,3)) AS Qty,
             STRING_AGG(CONVERT(NVARCHAR(MAX), i.UniqueNumber), ',') AS UniqueNumbers
         FROM T_PREBIN_ITEM i WITH (UPDLOCK, HOLDLOCK)
         WHERE i.PreBinBoxID = :preBinBoxID
-        GROUP BY i.ItemCode, i.ItemGroup, i.Type
+        GROUP BY i.ItemCode, i.ItemGroup
     `, {
         replacements: { preBinBoxID },
         transaction,
@@ -372,7 +380,7 @@ async function insertBinCompleteRow(transaction, { whsCode, boxNumber, grnNo, gr
             (:boxNumber, :grnNo, :grnType, :docNo, :itemCode, :itemName, :itemGroup, :qty, 'Completed', :createdBy, GETDATE(), 0, 'Completed', :scannedItemJson, :whsCode)
     `, {
         replacements: {
-            whsCode, boxNumber, grnNo, grnType: grnType || '', docNo: docNo || null,
+            whsCode, boxNumber, grnNo, grnType: grnType || '', docNo: docNo || '',
             itemCode, itemName, itemGroup, qty, createdBy, scannedItemJson
         },
         transaction,

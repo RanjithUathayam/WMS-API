@@ -320,7 +320,7 @@ async function completeBoxAsync({ boxNumber, whsCode }, user) {
                 boxNumber: trimmedBoxNumber,
                 grnNo: (grnLine && grnLine.GRNNo) || '',
                 grnType: line.Type || (grnLine && grnLine.Type),
-                docNo: grnLine && grnLine.DocNo,
+                docNo: (grnLine && grnLine.DocNo) || '',
                 itemCode: line.ItemCode,
                 itemName: itemNames[line.ItemCode] || line.ItemCode,
                 itemGroup: line.ItemGroup,
