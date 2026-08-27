@@ -1,0 +1,30 @@
+IF OBJECT_ID('dbo.T_LABEL_RESERVATION', 'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.T_LABEL_RESERVATION
+    (
+        ReservationID   BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        LabelNumber     NVARCHAR(30)    NOT NULL,
+        QRValue         NVARCHAR(50)    NOT NULL,
+        Status          NVARCHAR(20)    NOT NULL DEFAULT 'Reserved', -- Reserved | Printing | Printed | Failed | Cancelled
+        Copies          INT             NULL,
+        PrinterName     NVARCHAR(200)   NULL,
+        ErrorMessage    NVARCHAR(MAX)   NULL,
+        CreatedAt       DATETIME        NOT NULL DEFAULT GETDATE(),
+        ReservedAt      DATETIME        NOT NULL DEFAULT GETDATE(),
+        PrintedAt       DATETIME        NULL,
+        FailedAt        DATETIME        NULL
+    );
+END
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_LABEL_RESERVATION_LABELNUMBER' AND object_id = OBJECT_ID('dbo.T_LABEL_RESERVATION'))
+    CREATE UNIQUE INDEX UX_LABEL_RESERVATION_LABELNUMBER ON dbo.T_LABEL_RESERVATION(LabelNumber);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'UX_LABEL_RESERVATION_QRVALUE' AND object_id = OBJECT_ID('dbo.T_LABEL_RESERVATION'))
+    CREATE UNIQUE INDEX UX_LABEL_RESERVATION_QRVALUE ON dbo.T_LABEL_RESERVATION(QRValue);
+GO
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_LABEL_RESERVATION_STATUS' AND object_id = OBJECT_ID('dbo.T_LABEL_RESERVATION'))
+    CREATE INDEX IX_LABEL_RESERVATION_STATUS ON dbo.T_LABEL_RESERVATION(Status);
+GO

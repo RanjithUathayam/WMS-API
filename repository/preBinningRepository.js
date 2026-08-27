@@ -185,7 +185,7 @@ async function findGrnForItem(transaction, itemCode, itemGroup) {
 async function uniqueNumberExists(transaction, itemCode, uniqueNumber) {
     const rows = await sequelize.query(`
         SELECT TOP 1 1 AS found
-        FROM T_PREBIN_ITEM WITH (NOLOCK)
+        FROM T_PREBIN_ITEM WITH (UPDLOCK, HOLDLOCK)
         WHERE ItemCode = :itemCode AND UniqueNumber = :uniqueNumber
     `, {
         replacements: { itemCode, uniqueNumber },

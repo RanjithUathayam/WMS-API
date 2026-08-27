@@ -81,8 +81,22 @@ const authenticateToken = async (req, res, next) => {
     // GET /api/transaction/item (Item Inventory List) and the two would collide (same first
     // segment). It intentionally falls through to that entry's 'transaction_item_list' pattern;
     // see the summary note to the team about this shared-name limitation in checkPermission().
- 
- 
+
+    // Label Print Configuration & Printing (routes/labelPrintRoutes.js, mounted at /api/label-print).
+    // '/job' covers both POST /job (create) and GET /job/:printJobId/preview — same first segment.
+    { endpoint: '/config',pattern:'labelPrint_list', moduleName: 'Label Print Config', type:'List' },
+    { endpoint: '/printers',pattern:'labelPrint_list', moduleName: 'Label Print Printers', type:'List' },
+    { endpoint: '/job',pattern:'labelPrint_creates', moduleName: 'Label Print Job', type:'add' },
+    { endpoint: '/print',pattern:'labelPrint_creates', moduleName: 'Label Print', type:'add' },
+    { endpoint: '/retry',pattern:'labelPrint_creates', moduleName: 'Label Print Retry', type:'add' },
+
+    // Label Reservation & Printing (routes/labelReservationRoutes.js, mounted at /api/label).
+    // '/print' is already registered above for /api/label-print/print/:printJobId and is reused
+    // here — checkPermission keys off the first path segment only, regardless of which router or
+    // mount prefix the request came through, so both routes share the 'labelPrint_creates' pattern.
+    { endpoint: '/reserveLabelNumbers',pattern:'labelPrint_creates', moduleName: 'Label Reserve Numbers', type:'add' },
+    { endpoint: '/printers',pattern:'labelPrint_list', moduleName: 'Label Detect Printers', type:'List' },
+
 
     // transaction
     { endpoint: '/itemfilter',pattern:'transaction_item_list', moduleName: 'Item Transaction List',type:'List' },
@@ -283,7 +297,7 @@ const authenticateToken = async (req, res, next) => {
                 {
                     return res.status(202).json({ status:0,message: 'Invalid request endpoint' });
                 }
-                else if (req.user.userGroup=='Admin' || req.url.startsWith('/api/data')) 
+                else if (req.user.UserGroup=='Admin' || req.url.startsWith('/api/data'))
                 {
 
                 }
