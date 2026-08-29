@@ -82,6 +82,42 @@ const authenticateToken = async (req, res, next) => {
     // segment). It intentionally falls through to that entry's 'transaction_item_list' pattern;
     // see the summary note to the team about this shared-name limitation in checkPermission().
 
+    // Location Master (routes/locationRoutes.js, mounted at /api/location).
+    // Every route here was deliberately given a literal-keyword first path segment (details/,
+    // create, activate/, deactivate/, positions/...) instead of a bare dynamic :locationId or an
+    // empty POST / — checkPermission() below only keys off that first segment, so a dynamic or
+    // empty one can never match and silently blocks EVERY user, including Admin.
+    // '/warehouse' covers both GET /warehouse/:warehouseCode/rows and
+    // GET /warehouse/:warehouseCode/row/:rowCode/positions (both reads, same first segment).
+    // NOTE: GET /api/location/warehouses (plural) is NOT registered here — '/warehouses' already
+    // exists above for Pre-Binning (GET /api/pre-binning/warehouses), so it falls through to that
+    // entry's 'preBinning_list' pattern instead of getting its own Location Master permission.
+    { endpoint: '/warehouse',pattern:'preBinning_list', moduleName: 'Location Master Warehouse Rows/Positions', type:'List' },
+    { endpoint: '/positions',pattern:'locationMaster_creates', moduleName: 'Location Master Bulk Generate Positions', type:'add' },
+    { endpoint: '/details',pattern:'locationMaster_list', moduleName: 'Location Master Details', type:'List' },
+    { endpoint: '/create',pattern:'locationMaster_creates', moduleName: 'Location Master Create', type:'add' },
+    { endpoint: '/activate',pattern:'locationMaster_modifies', moduleName: 'Location Master Activate', type:'update' },
+    { endpoint: '/deactivate',pattern:'locationMaster_modifies', moduleName: 'Location Master Deactivate', type:'update' },
+
+    // Location Mapping (routes/locationMappingRoutes.js, mounted at /api/location-mapping).
+    // '/pallet' covers GET /pallet/:palletId/validate and GET /pallet/:palletId (both reads) and
+    // shares the '/pallet' entry registered below for Pallet Mapping ('palletMapping_list') —
+    // same shared-first-segment convention as '/box'/'/item'/'/print' elsewhere in this file.
+    // POST /map is the real pallet -> location scan/assign action, given its own literal segment
+    // (was POST / — an empty first segment that, like Location Master above, blocked everyone).
+    { endpoint: '/map',pattern:'locationMapping_creates', moduleName: 'Location Mapping Map Pallet', type:'add' },
+
+    // Pallet Mapping (routes/palletMappingRoutes.js, mounted at /api/pallet-mapping).
+    // '/pallet' covers GET /pallet/:palletId/validate and GET /pallet/:palletId (both reads) since
+    // checkPermission() only keys off the first path segment after the router's baseUrl.
+    // NOTE: '/box' is NOT registered here — it already exists above for Pre-Binning
+    // (GET/POST /api/pre-binning/box...) and checkPermission() resolves by first segment only,
+    // regardless of which router the request came through, so GET /box/:boxNumber/validate and
+    // POST /box under /api/pallet-mapping fall through to that existing 'preBinning_creates' entry.
+    // Same shared-name limitation already accepted for '/item' and '/print' above.
+    { endpoint: '/pallet',pattern:'palletMapping_list', moduleName: 'Pallet Mapping', type:'List' },
+    { endpoint: '/complete',pattern:'palletMapping_creates', moduleName: 'Pallet Mapping Complete', type:'add' },
+
     // Label Print Configuration & Printing (routes/labelPrintRoutes.js, mounted at /api/label-print).
     // '/job' covers both POST /job (create) and GET /job/:printJobId/preview — same first segment.
     { endpoint: '/config',pattern:'labelPrint_list', moduleName: 'Label Print Config', type:'List' },
@@ -97,6 +133,14 @@ const authenticateToken = async (req, res, next) => {
     { endpoint: '/reserveLabelNumbers',pattern:'labelPrint_creates', moduleName: 'Label Reserve Numbers', type:'add' },
     { endpoint: '/printers',pattern:'labelPrint_list', moduleName: 'Label Detect Printers', type:'List' },
 
+    // HHT Inventory (routes/inventoryRoutes.js, mounted at /api/inventory) — reuses the existing
+    // 'inventory_item_list' pattern below (same permission as the Transaction module's Inventory
+    // List). GET /pallet/:palletId here shares the '/pallet' entry registered under Pallet
+    // Mapping ('palletMapping_list') by the same first-segment convention noted elsewhere.
+    // GET /list was POST-free GET / (empty first segment) — renamed so checkPermission can match it.
+    { endpoint: '/summary',pattern:'inventory_item_list', moduleName: 'Inventory Summary', type:'List' },
+    { endpoint: '/location',pattern:'inventory_item_list', moduleName: 'Inventory By Location', type:'List' },
+    { endpoint: '/list',pattern:'inventory_item_list', moduleName: 'Inventory List', type:'List' },
 
     // transaction
     { endpoint: '/itemfilter',pattern:'transaction_item_list', moduleName: 'Item Transaction List',type:'List' },

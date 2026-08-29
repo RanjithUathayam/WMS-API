@@ -18,6 +18,10 @@ const HHTRouter = require('./routes/HHTRouter')
 const preBinningRoutes = require('./routes/preBinningRoutes')
 const labelPrintRoutes = require('./routes/labelPrintRoutes')
 const labelReservationRoutes = require('./routes/labelReservationRoutes')
+const palletMappingRoutes = require('./routes/palletMappingRoutes')
+const locationRoutes = require('./routes/locationRoutes')
+const locationMappingRoutes = require('./routes/locationMappingRoutes')
+const inventoryRoutes = require('./routes/inventoryRoutes')
 const { sequelize } = require('./config/database');
 const KEPGroundConveyorStatus = require('./models/operation/KEPGroundConveyorStatus');
 const RetrievalConfirmation = require('./models/operation/RetrievalConfirmation');
@@ -65,6 +69,10 @@ app.use('/api/config',authenticateToken, configRouter)
 app.use('/api/pre-binning', authenticateToken, preBinningRoutes)
 app.use('/api/label-print', authenticateToken, labelPrintRoutes)
 app.use('/api/label', authenticateToken, labelReservationRoutes)
+app.use('/api/pallet-mapping', authenticateToken, palletMappingRoutes)
+app.use('/api/location', authenticateToken, locationRoutes)
+app.use('/api/location-mapping', authenticateToken, locationMappingRoutes)
+app.use('/api/inventory', authenticateToken, inventoryRoutes)
 
 //Data Clean
 // cron.schedule('0 0 * * *', async () => {  
