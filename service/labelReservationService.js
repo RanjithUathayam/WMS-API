@@ -30,9 +30,9 @@ function isBlank(value) {
     return value === undefined || value === null || String(value).trim() === '';
 }
 
-/** Label Number = current server date (YYYYMMDD) + zero-padded running number. */
+/** Label Number = current server date (YYYYMMDD) + "--" + zero-padded running number. */
 function formatLabelNumber(datePrefix, runningNumber) {
-    return `${datePrefix}${String(runningNumber).padStart(4, '0')}`;
+    return `${datePrefix}--${String(runningNumber).padStart(4, '0')}`;
 }
 
 function mapReservationRow(row) {
