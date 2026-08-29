@@ -20,16 +20,6 @@ async function getActivePrinterConfig() {
     return rows[0] || null;
 }
 
-/** Every enabled printer configuration — the list a "Detect Printer" UI picks from. */
-async function getAllPrinterConfigs() {
-    return sequelize.query(`
-        SELECT ConfigID, PrinterName, Density, Speed
-        FROM T_LABEL_PRINT_CONFIG WITH (NOLOCK)
-        WHERE IsActive = 1
-        ORDER BY ConfigID
-    `, { type: QueryTypes.SELECT });
-}
-
 /** Full capability + durable-defaults row for one printer by name (see LabelPrinterCapability_Schema.sql). */
 async function getPrinterCapabilityByName(printerName) {
     const rows = await sequelize.query(`
@@ -80,22 +70,12 @@ async function getActiveTemplate() {
     return rows[0] || null;
 }
 
-async function getTemplateById(templateId) {
-    const rows = await sequelize.query(`
-        SELECT TOP 1 * FROM T_LABEL_TEMPLATE WITH (NOLOCK) WHERE TemplateID = :templateId
-    `, {
-        replacements: { templateId },
-        type: QueryTypes.SELECT
-    });
-    return rows[0] || null;
-}
-
 /**
  * Atomically reserves `count` sequential running numbers for `printDate` (a 'YYYY-MM-DD' string)
  * and returns the inclusive [start, end] running-number range. Must be called inside the caller's
  * transaction. The UPDATE is tried first (the common case — today's row already exists); if no row
  * exists yet the INSERT creates it, with a retry-on-race for two requests both trying to create the
- * first row for a brand-new date at the same time (mirrors createBox in preBinningRepository.js).
+ * first row for a brand-new date at the same time.
  */
 async function reserveLabelNumbers(transaction, printDate, count) {
     let rows = await sequelize.query(`
@@ -140,158 +120,10 @@ async function reserveLabelNumbers(transaction, printDate, count) {
     return { start: end - count + 1, end };
 }
 
-async function createPrintJob(transaction, job) {
-    const rows = await sequelize.query(`
-        INSERT INTO T_LABEL_PRINT_JOB
-            (TemplateID, PrinterName, LabelWidth, LabelHeight, Gap, Density, Speed, LabelCount, Copies, TotalPhysicalPrints, Status, CreatedBy, CreatedAt)
-        OUTPUT INSERTED.*
-        VALUES
-            (:templateId, :printerName, :labelWidth, :labelHeight, :gap, :density, :speed, :labelCount, :copies, :totalPhysicalPrints, :status, :createdBy, GETDATE())
-    `, {
-        replacements: {
-            templateId: job.templateId,
-            printerName: job.printerName,
-            labelWidth: job.labelWidth,
-            labelHeight: job.labelHeight,
-            gap: job.gap,
-            density: job.density,
-            speed: job.speed,
-            labelCount: job.labelCount,
-            copies: job.copies,
-            totalPhysicalPrints: job.totalPhysicalPrints,
-            status: job.status,
-            createdBy: job.createdBy || null
-        },
-        transaction,
-        type: QueryTypes.SELECT
-    });
-    return rows[0];
-}
-
-async function insertLabelRecord(transaction, record) {
-    const rows = await sequelize.query(`
-        INSERT INTO T_LABEL_RECORD
-            (PrintJobID, LabelNumber, QRValue, ItemID, SKU, ProductName, StyleNo, Customer, Size, Color, MRP, Copies, Status, CreatedAt)
-        OUTPUT INSERTED.*
-        VALUES
-            (:printJobId, :labelNumber, :qrValue, :itemId, :sku, :productName, :styleNo, :customer, :size, :color, :mrp, :copies, :status, GETDATE())
-    `, {
-        replacements: {
-            printJobId: record.printJobId,
-            labelNumber: record.labelNumber,
-            qrValue: record.qrValue,
-            itemId: record.itemId,
-            sku: record.sku,
-            productName: record.productName,
-            styleNo: record.styleNo || null,
-            customer: record.customer || null,
-            size: record.size || null,
-            color: record.color || null,
-            mrp: record.mrp === undefined || record.mrp === null ? null : record.mrp,
-            copies: record.copies,
-            status: record.status
-        },
-        transaction,
-        type: QueryTypes.SELECT
-    });
-    return rows[0];
-}
-
-async function findJobById(transaction, printJobId) {
-    const rows = await sequelize.query(`
-        SELECT * FROM T_LABEL_PRINT_JOB WITH (NOLOCK) WHERE PrintJobID = :printJobId
-    `, {
-        replacements: { printJobId },
-        transaction,
-        type: QueryTypes.SELECT
-    });
-    return rows[0] || null;
-}
-
-async function lockJobById(transaction, printJobId) {
-    const rows = await sequelize.query(`
-        SELECT * FROM T_LABEL_PRINT_JOB WITH (UPDLOCK, ROWLOCK, HOLDLOCK) WHERE PrintJobID = :printJobId
-    `, {
-        replacements: { printJobId },
-        transaction,
-        type: QueryTypes.SELECT
-    });
-    return rows[0] || null;
-}
-
-async function getRecordsForJob(transaction, printJobId) {
-    return sequelize.query(`
-        SELECT * FROM T_LABEL_RECORD WITH (NOLOCK) WHERE PrintJobID = :printJobId ORDER BY LabelID
-    `, {
-        replacements: { printJobId },
-        transaction,
-        type: QueryTypes.SELECT
-    });
-}
-
-/**
- * StartedAt/CompletedAt are stamped with the database server's own GETDATE(), not the Node app
- * server's clock — startedAt/completedAt here are just booleans ("stamp this now or leave it alone"),
- * matching every other timestamp column in this codebase (CreatedAt/ReservedAt/UpdatedAt). Passing a
- * Node-computed Date through as a parameter would tie the stored timestamp to the app server's clock,
- * which can drift from the DB server's — exactly the kind of skew GETDATE() avoids everywhere else.
- */
-async function updateJobStatus(transaction, printJobId, status, { errorMessage, startedAt, completedAt } = {}) {
-    await sequelize.query(`
-        UPDATE T_LABEL_PRINT_JOB
-        SET Status = :status,
-            ErrorMessage = :errorMessage,
-            StartedAt = CASE WHEN :setStartedAt = 1 THEN GETDATE() ELSE StartedAt END,
-            CompletedAt = CASE WHEN :setCompletedAt = 1 THEN GETDATE() ELSE CompletedAt END
-        WHERE PrintJobID = :printJobId
-    `, {
-        replacements: {
-            printJobId,
-            status,
-            errorMessage: errorMessage || null,
-            setStartedAt: startedAt ? 1 : 0,
-            setCompletedAt: completedAt ? 1 : 0
-        },
-        transaction,
-        type: QueryTypes.UPDATE
-    });
-}
-
-/** Same GETDATE()-on-the-DB-server approach as updateJobStatus above — see its comment. */
-async function updateRecordsStatusForJob(transaction, printJobId, status, { errorMessage, printedAt, failedAt } = {}) {
-    await sequelize.query(`
-        UPDATE T_LABEL_RECORD
-        SET Status = :status,
-            ErrorMessage = :errorMessage,
-            PrintedAt = CASE WHEN :setPrintedAt = 1 THEN GETDATE() ELSE PrintedAt END,
-            FailedAt = CASE WHEN :setFailedAt = 1 THEN GETDATE() ELSE FailedAt END
-        WHERE PrintJobID = :printJobId
-    `, {
-        replacements: {
-            printJobId,
-            status,
-            errorMessage: errorMessage || null,
-            setPrintedAt: printedAt ? 1 : 0,
-            setFailedAt: failedAt ? 1 : 0
-        },
-        transaction,
-        type: QueryTypes.UPDATE
-    });
-}
-
 module.exports = {
     getActivePrinterConfig,
-    getAllPrinterConfigs,
     getPrinterCapabilityByName,
     upsertPrinterLastUsedSettings,
     getActiveTemplate,
-    getTemplateById,
     reserveLabelNumbers,
-    createPrintJob,
-    insertLabelRecord,
-    findJobById,
-    lockJobById,
-    getRecordsForJob,
-    updateJobStatus,
-    updateRecordsStatusForJob
 };
