@@ -13,6 +13,8 @@ const HHTRouter = require('./routes/HHTRouter')
 const labelPrintRoutes = require('./routes/labelPrintRoutes')
 const labelReservationRoutes = require('./routes/labelReservationRoutes')
 const locationRoutes = require('./routes/locationRoutes')
+const locationMappingRoutes = require('./routes/locationMappingRoutes')
+const palletMappingRoutes = require('./routes/palletMappingRoutes')
 const transactionRoutes = require('./routes/transactionRoutes');
 const dataRoutes = require('./routes/dataRoutes');
 const masterExport = require('./routes/masterExport')
@@ -45,6 +47,8 @@ app.use('/api/config',authenticateToken, configRouter)
 app.use('/api/label-print', authenticateToken, labelPrintRoutes)
 app.use('/api/label', authenticateToken, labelReservationRoutes)
 app.use('/api/location', authenticateToken, locationRoutes)
+app.use('/api/location-mapping', authenticateToken, locationMappingRoutes)
+app.use('/api/pallet-mapping', authenticateToken, palletMappingRoutes)
 const PORT = process.env.PORT || 3300//8083;
 
 // Use server variable to listen instead of app

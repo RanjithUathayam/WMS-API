@@ -190,6 +190,21 @@ async function lockLocationById(transaction, locationId) {
     return rows[0] || null;
 }
 
+/** Locks the location row for mutation by its LocationCode (e.g. a barcode scan), inside a transaction. */
+async function lockLocationByCode(transaction, locationCode) {
+    const rows = await sequelize.query(`
+        SELECT LocationID, WarehouseCode, RowCode, PositionNo, LocationCode, Status,
+               CurrentPalletMappingID, CurrentPalletID, OccupiedBy, OccupiedAt
+        FROM T_LOCATION WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
+        WHERE LocationCode = :locationCode
+    `, {
+        replacements: { locationCode },
+        transaction,
+        type: QueryTypes.SELECT
+    });
+    return rows[0] || null;
+}
+
 async function createLocation(transaction, { warehouseCode, rowCode, positionNo, locationCode, createdBy }) {
     try {
         const rows = await sequelize.query(`
@@ -281,6 +296,7 @@ module.exports = {
     findLocationByCombo,
     findLocationById,
     lockLocationById,
+    lockLocationByCode,
     createLocation,
     getLocationMappingHistoryCount,
     updateLocationCombo,
