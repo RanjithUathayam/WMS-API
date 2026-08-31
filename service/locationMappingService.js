@@ -2,6 +2,7 @@ const { sequelize } = require('../config/database');
 const repository = require('../repository/locationMappingRepository');
 const locationRepository = require('../repository/locationRepository');
 const palletMappingRepository = require('../repository/palletMappingRepository');
+const inventoryRepository = require('../repository/inventoryRepository');
 
 class LocationMappingError extends Error {
     constructor(code, message) {
@@ -90,6 +91,23 @@ async function mapPalletToLocationAsync(rawRequest, user) {
             palletId,
             occupiedBy: mappedBy
         });
+
+        const itemBreakdown = await inventoryRepository.getItemBreakdownForBoxes(transaction, palletMapping.PalletMappingID);
+        for (const item of itemBreakdown) {
+            await inventoryRepository.upsertInventoryRow(transaction, {
+                warehouseCode: location.WarehouseCode,
+                rowCode: location.RowCode,
+                locationId: location.LocationID,
+                locationCode: location.LocationCode,
+                palletMappingId: palletMapping.PalletMappingID,
+                palletId,
+                boxNumber: item.BoxNumber,
+                itemCode: item.ItemCode,
+                itemGroup: item.ItemGroup,
+                quantity: item.Quantity,
+                mappedBy
+            });
+        }
 
         return insertedMapping;
     });
