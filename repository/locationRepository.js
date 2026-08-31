@@ -139,7 +139,7 @@ async function generatePositions(warehouseCode, rowCode, startPosition, endPosit
 /** Available (unoccupied, unblocked, active) positions for a warehouse + row. */
 async function getAvailablePositions(warehouseCode, rowCode) {
     return sequelize.query(`
-        SELECT LocationID, LocationCode, PositionNo
+        SELECT LocationID, WarehouseCode, RowCode, LocationCode, PositionNo, Status
         FROM T_LOCATION WITH (NOLOCK)
         WHERE WarehouseCode = :warehouseCode AND RowCode = :rowCode AND Status = 'AVAILABLE'
         ORDER BY PositionNo

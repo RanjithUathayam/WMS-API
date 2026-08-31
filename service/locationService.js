@@ -128,8 +128,11 @@ async function getAvailablePositionsAsync(warehouseCode, rowCode) {
     const positions = await repository.getAvailablePositions(String(warehouseCode).trim(), String(rowCode).trim());
     return positions.map(p => ({
         locationId: p.LocationID,
+        warehouseCode: p.WarehouseCode,
+        rowCode: p.RowCode,
         locationCode: p.LocationCode,
-        positionNo: p.PositionNo
+        positionNo: p.PositionNo,
+        status: p.Status
     }));
 }
 

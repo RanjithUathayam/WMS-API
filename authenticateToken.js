@@ -320,7 +320,7 @@ const authenticateToken = async (req, res, next) => {
             let entry = endUrl.replace(req.baseUrl, '');
             entry = entry.split('?')[0];
             const endpointParts = entry.split('/');
-            endpoint[1] = endpointParts.filter(part => part.trim() !== '').pop();
+            endpoint[1] = endpointParts.filter(part => part.trim() !== '')[0];
         }
 
         if((req.url != '/ERPLogin') && (req.url != '/login') && (req.url != '/getPickStationData'))
