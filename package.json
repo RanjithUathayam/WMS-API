@@ -10,7 +10,9 @@
             "controller/**/*",
             "models/**/*",
             "routes/**/*",
-            "node_modules/**/*"
+            "node_modules/**/*",
+            "scripts/**/*",
+            "service/**/*"
         ]
     },
     "scripts": {

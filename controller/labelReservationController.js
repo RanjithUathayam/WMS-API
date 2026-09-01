@@ -55,7 +55,7 @@ const listPrinters = async (req, res) => {
 
 const detectPrinters = async (req, res) => {
     try {
-        const result = await service.listPrintersAsync({ forceRefresh: true });
+        const result = await service.detectPrintersAsync();
         return res.status(200).json(result);
     } catch (error) {
         return handleError(res, error);

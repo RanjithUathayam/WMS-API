@@ -11,8 +11,16 @@ class PrinterDetectionError extends Error {
     }
 }
 
-const DETECT_SCRIPT = path.join(__dirname, '..', 'scripts', 'detect-printers.ps1');
-const SEND_SCRIPT = path.join(__dirname, '..', 'scripts', 'send-raw-print.ps1');
+// Under a pkg-packaged exe, __dirname resolves to a virtual snapshot path (e.g. C:\snapshot\...)
+// that only Node's patched fs module can read. powershell.exe is a separate OS process invoked via
+// execFile, so it needs a real path on disk — resolve against the exe's own directory in that case,
+// where the scripts folder must be deployed alongside it (it's deliberately excluded from pkg's
+// "assets" bundling for this reason).
+const SCRIPTS_DIR = process.pkg
+    ? path.join(path.dirname(process.execPath), 'scripts')
+    : path.join(__dirname, '..', 'scripts');
+const DETECT_SCRIPT = path.join(SCRIPTS_DIR, 'detect-printers.ps1');
+const SEND_SCRIPT = path.join(SCRIPTS_DIR, 'send-raw-print.ps1');
 const EXEC_TIMEOUT_MS = 10000;
 
 // Printer enumeration has real (~150-300ms) process-spawn overhead, and a settings screen may poll
@@ -91,6 +99,18 @@ async function detectPrinters({ forceRefresh = false } = {}) {
     return printers;
 }
 
+/**
+ * Same detection as detectPrinters({forceRefresh:true}), but propagates a real detection failure
+ * instead of swallowing it into an empty list — for the explicit "Detect" action, where silently
+ * returning [] on a broken script/timeout is indistinguishable from "genuinely zero printers" and
+ * leaves the user with no way to tell a real failure apart from an empty printer list.
+ */
+async function detectPrintersForceOrThrow() {
+    const printers = await detectPrintersOrThrow();
+    cache = { at: Date.now(), printers };
+    return printers;
+}
+
 async function detectPrintersOrThrow() {
     let stdout;
     try {
@@ -152,5 +172,6 @@ module.exports = {
     mapPrinterStatus,
     detectPrinters,
     detectPrintersOrThrow,
+    detectPrintersForceOrThrow,
     sendRawToPrinterAsync
 };

@@ -10,6 +10,7 @@ const historyRoutes = require('./routes/historyRoutes');
 const operationRouter = require('./routes/operationRouter');
 const ERPRouter = require('./routes/ERPRoutes')
 const HHTRouter = require('./routes/HHTRouter')
+const preBinningRoutes = require('./routes/preBinningRoutes')
 const labelPrintRoutes = require('./routes/labelPrintRoutes')
 const labelReservationRoutes = require('./routes/labelReservationRoutes')
 const locationRoutes = require('./routes/locationRoutes')
@@ -45,6 +46,7 @@ app.use('/api/transaction', authenticateToken, transactionRoutes);
 app.use('/api/ERP', authenticateToken, ERPRouter)
 app.use('/api/HHT',authenticateToken, HHTRouter)
 app.use('/api/config',authenticateToken, configRouter)
+app.use('/api/pre-binning', authenticateToken, preBinningRoutes)
 app.use('/api/label-print', authenticateToken, labelPrintRoutes)
 app.use('/api/label', authenticateToken, labelReservationRoutes)
 app.use('/api/location', authenticateToken, locationRoutes)

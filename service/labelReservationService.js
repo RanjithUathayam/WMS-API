@@ -395,9 +395,20 @@ async function listPrintersAsync({ forceRefresh = false } = {}) {
     return { success: true, printers };
 }
 
+/** For the explicit "Detect" action — surfaces a real detection failure instead of the swallowed [] listPrintersAsync would silently return. */
+async function detectPrintersAsync() {
+    try {
+        const printers = await printerDetection.detectPrintersForceOrThrow();
+        return { success: true, printers };
+    } catch (error) {
+        throw new LabelReservationError('PRINTER_DETECTION_FAILED', error.message || 'Unable to query installed printers.');
+    }
+}
+
 module.exports = {
     LabelReservationError,
     reserveLabelNumbersAsync,
     printLabelsAsync,
-    listPrintersAsync
+    listPrintersAsync,
+    detectPrintersAsync
 };
