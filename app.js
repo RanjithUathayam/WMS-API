@@ -29,6 +29,16 @@ app.use(express.json());
 app.use(express.json({ limit: '1gb' }));
 app.use(bodyParser.json({ limit: '1gb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '1gb' }));
+// Chrome/Edge Private Network Access: a page loaded from a routable address (e.g. the central
+// server's IP) calling a loopback/local-network address (the printer agent on localhost) requires
+// this header on the preflight response, or the browser silently blocks the request as a network
+// error — the `cors` package (2.8.6) doesn't send it on its own.
+app.use((req, res, next) => {
+    if (req.headers['access-control-request-private-network']) {
+        res.setHeader('Access-Control-Allow-Private-Network', 'true');
+    }
+    next();
+});
 app.use(cors({ origin: '*' }))
 
 

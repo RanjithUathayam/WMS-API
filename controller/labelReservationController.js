@@ -44,6 +44,15 @@ const printLabels = async (req, res) => {
     }
 };
 
+const confirmPrint = async (req, res) => {
+    try {
+        const result = await service.confirmPrintAsync(req.body);
+        return res.status(200).json(result);
+    } catch (error) {
+        return handleError(res, error);
+    }
+};
+
 const listPrinters = async (req, res) => {
     try {
         const result = await service.listPrintersAsync();
@@ -65,6 +74,7 @@ const detectPrinters = async (req, res) => {
 module.exports = {
     reserveLabelNumbers,
     printLabels,
+    confirmPrint,
     listPrinters,
     detectPrinters
 };

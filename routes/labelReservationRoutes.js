@@ -7,6 +7,7 @@ const labelReservationController = require('../controller/labelReservationContro
 // without also updating the frontend's API call.
 router.post('/reserveLabelNumbers', labelReservationController.reserveLabelNumbers);
 router.post('/print', labelReservationController.printLabels);
+router.post('/print/confirm', labelReservationController.confirmPrint);
 router.get('/printers', labelReservationController.listPrinters);
 router.post('/printers/detect', labelReservationController.detectPrinters);
 

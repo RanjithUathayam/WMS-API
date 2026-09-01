@@ -261,39 +261,21 @@ async function resolvePrintableArea(labelWidthMm) {
     };
 }
 
-/** Resolves the printer to print with: explicit request value, else the OS-reported default, else
- *  the single active DB config row, and validates it against live detection when detection works. */
+/**
+ * Resolves the printer to print with: explicit request value, else the single active DB config row.
+ * Printer existence/offline state can no longer be validated here — the printer is physically attached
+ * to whichever browser/workstation is printing (via QZ Tray), not to this server, so this server has
+ * no way to see it. The browser is responsible for only offering printers QZ Tray actually detected.
+ */
 async function resolvePrinterName(printerName) {
     let name = isBlank(printerName) ? null : String(printerName).trim();
 
-    let detected = [];
-    try {
-        detected = await printerDetection.detectPrinters();
-    } catch (error) {
-        console.error('Printer detection unavailable while resolving print request:', error.message);
-    }
-
     if (!name) {
-        const osDefault = detected.find(p => p.isDefault);
-        if (osDefault) {
-            name = osDefault.name;
-        } else {
-            const config = await sequenceRepository.getActivePrinterConfig();
-            if (!config) {
-                throw new LabelReservationError('PRINTER_NOT_CONFIGURED', 'Printer name is required.');
-            }
-            name = config.PrinterName;
+        const config = await sequenceRepository.getActivePrinterConfig();
+        if (!config) {
+            throw new LabelReservationError('PRINTER_NOT_CONFIGURED', 'Printer name is required.');
         }
-    }
-
-    if (detected.length > 0) {
-        const match = detected.find(p => p.name.toLowerCase() === name.toLowerCase());
-        if (!match) {
-            throw new LabelReservationError('PRINTER_NOT_FOUND', `The selected printer is not available: ${name}.`);
-        }
-        if (match.status === 'offline') {
-            throw new LabelReservationError('PRINTER_OFFLINE', `The selected printer is offline: ${name}.`);
-        }
+        name = config.PrinterName;
     }
 
     return name;
@@ -301,8 +283,11 @@ async function resolvePrinterName(printerName) {
 
 /**
  * POST /api/label/print — verifies every labelNumber was actually reserved (never accepts arbitrary
- * numbers), rejects any that are already Printed/Printing/Cancelled, builds the actual TSPL command
- * from the requested density/speed/gap/offset/dimensions, and sends it to the printer's spooler. A
+ * numbers), rejects any that are already Printed/Printing/Cancelled, and builds the actual TSPL
+ * command from the requested density/speed/gap/offset/dimensions. Marks the batch "Printing" and
+ * returns that command WITHOUT sending it to any printer — the printer is physically attached to
+ * whichever browser/workstation made this request (selected via QZ Tray there), not to this server,
+ * so the browser sends the command itself and calls confirmPrintAsync with the real outcome. A
  * previously Failed Label Number can be retried simply by calling this again with the same
  * labelNumbers — no new Label Number is ever generated for a retry.
  */
@@ -350,18 +335,6 @@ async function printLabelsAsync(body) {
             throw new LabelReservationError('PRINT_COMMAND_GENERATION_FAILED', 'Unable to generate the printer command for this label set.');
         }
 
-        try {
-            await printerDetection.sendRawToPrinterAsync(printerName, tsplCommand);
-        } catch (error) {
-            await repository.updateReservationsStatus(transaction, labelNumbers, 'Failed', { errorMessage: error.message, failedAt: true });
-            if (error instanceof printerDetection.PrinterDetectionError) {
-                throw new LabelReservationError(error.code, error.message);
-            }
-            throw new LabelReservationError('PRINT_FAILED', `Printing failed: ${error.message}`);
-        }
-
-        await repository.updateReservationsStatus(transaction, labelNumbers, 'Printed', { printedAt: true });
-
         const updated = await repository.lockReservationsByLabelNumbers(transaction, labelNumbers);
         return { updated, tsplCommand };
     });
@@ -375,7 +348,7 @@ async function printLabelsAsync(body) {
     const totalPhysicalPrints = entries.reduce((sum, e) => sum + e.copies, 0);
     return {
         success: true,
-        message: 'Print job completed successfully',
+        message: 'Print command generated — send it to the printer, then confirm the outcome',
         data: {
             printerName,
             ...settings,
@@ -388,8 +361,59 @@ async function printLabelsAsync(body) {
     };
 }
 
+/**
+ * POST /api/label/print/confirm — the browser calls this right after it actually sends printLabelsAsync's
+ * `command` to the printer via QZ Tray, reporting whether it truly reached the printer. This is the only
+ * place a "Printing" batch is ever resolved to "Printed" or "Failed" now that this server never talks to
+ * the printer itself.
+ */
+async function confirmPrintAsync(body) {
+    const labelNumbers = Array.isArray(body.labelNumbers)
+        ? body.labelNumbers.filter(n => !isBlank(n)).map(n => String(n).trim())
+        : [];
+    if (labelNumbers.length === 0) {
+        throw new LabelReservationError('VALIDATION_ERROR', 'labelNumbers must be a non-empty array.');
+    }
+    const success = !!body.success;
+    const errorMessage = isBlank(body.errorMessage) ? null : String(body.errorMessage).trim();
+
+    const updated = await sequelize.transaction(async (transaction) => {
+        const rows = await repository.lockReservationsByLabelNumbers(transaction, labelNumbers);
+
+        const foundNumbers = new Set(rows.map(row => row.LabelNumber));
+        const missing = labelNumbers.filter(number => !foundNumbers.has(number));
+        if (missing.length) {
+            throw new LabelReservationError('LABEL_NUMBERS_NOT_FOUND', `These Label Numbers were not reserved: ${missing.join(', ')}.`);
+        }
+
+        const notPrinting = rows.filter(row => row.Status !== 'Printing');
+        if (notPrinting.length) {
+            throw new LabelReservationError('LABEL_NOT_PRINTABLE', `These Label Numbers are not awaiting a print confirmation: ${notPrinting.map(r => `${r.LabelNumber} (${r.Status})`).join(', ')}.`);
+        }
+
+        if (success) {
+            await repository.updateReservationsStatus(transaction, labelNumbers, 'Printed', { printedAt: true });
+        } else {
+            await repository.updateReservationsStatus(transaction, labelNumbers, 'Failed', {
+                errorMessage: errorMessage || 'Printing failed on the client.',
+                failedAt: true
+            });
+        }
+
+        return repository.lockReservationsByLabelNumbers(transaction, labelNumbers);
+    });
+
+    return {
+        success: true,
+        message: success ? 'Print confirmed' : 'Print failure recorded',
+        data: { labels: updated.map(mapReservationRow) }
+    };
+}
+
 /** GET /api/label/printers — the list a "Detect Printer" UI picks from; POST /printers/detect forces
- *  a fresh OS query instead of serving the short-lived cache. */
+ *  a fresh OS query instead of serving the short-lived cache. Kept for compatibility, but note this
+ *  only ever reports THIS server's own printers, never the browser's — the label-print screen uses
+ *  QZ Tray client-side instead (see label-print.component.ts). */
 async function listPrintersAsync({ forceRefresh = false } = {}) {
     const printers = await printerDetection.detectPrinters({ forceRefresh });
     return { success: true, printers };
@@ -409,6 +433,7 @@ module.exports = {
     LabelReservationError,
     reserveLabelNumbersAsync,
     printLabelsAsync,
+    confirmPrintAsync,
     listPrintersAsync,
     detectPrintersAsync
 };
