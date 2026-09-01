@@ -55,7 +55,7 @@ function generateCSVData(res, data, reportName, columns) {
     const formattedData = data.map(row => {
         const formattedRow = {};
         JSON.parse(columns).forEach(column => {
-            if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report'))
+            if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report') || (reportName == 'Pre-Binning Report') || (reportName == 'Pallet Mapping Report') || (reportName == 'Location Mapping Report') || (reportName == 'Inventory Details Report'))
             {
                 formattedRow[column.data] = row[column.data] !== undefined ? row[column.data] : 'N/A';
             }
@@ -112,7 +112,7 @@ async function generateExcelData(res, data, reportName, columns) {
         const jsonRows = data.map(obj => {
             const row = [];
             parsedColumns.forEach(header => {
-                if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report'))
+                if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report') || (reportName == 'Pre-Binning Report') || (reportName == 'Pallet Mapping Report') || (reportName == 'Location Mapping Report') || (reportName == 'Inventory Details Report'))
                 {
                     row.push(obj[header.data] !== undefined ? obj[header.data] : 'N/A'); // Only include columns present in the header
                 }
@@ -192,7 +192,7 @@ async function generateHTMLPDFData(res, data, reportName, columns) {
     data.forEach(row => {
         html += '<tr style="font-size:10px; height:20px;">';
         parsedColumns.forEach(column => {
-            if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report'))
+            if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report') || (reportName == 'Pre-Binning Report') || (reportName == 'Pallet Mapping Report') || (reportName == 'Location Mapping Report') || (reportName == 'Inventory Details Report'))
             {
                 const cellValue = row[column.data] !== undefined ? row[column.data] : 'N/A';
                 html += `<td style="width: ${columnWidth}%; text-align: left;">${cellValue}</td>`;

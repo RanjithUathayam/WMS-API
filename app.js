@@ -15,6 +15,7 @@ const labelReservationRoutes = require('./routes/labelReservationRoutes')
 const locationRoutes = require('./routes/locationRoutes')
 const locationMappingRoutes = require('./routes/locationMappingRoutes')
 const palletMappingRoutes = require('./routes/palletMappingRoutes')
+const reportRoutes = require('./routes/reportRoutes')
 const transactionRoutes = require('./routes/transactionRoutes');
 const dataRoutes = require('./routes/dataRoutes');
 const masterExport = require('./routes/masterExport')
@@ -49,6 +50,7 @@ app.use('/api/label', authenticateToken, labelReservationRoutes)
 app.use('/api/location', authenticateToken, locationRoutes)
 app.use('/api/location-mapping', authenticateToken, locationMappingRoutes)
 app.use('/api/pallet-mapping', authenticateToken, palletMappingRoutes)
+app.use('/api/reports', authenticateToken, reportRoutes)
 const PORT = process.env.PORT || 3300//8083;
 
 // Use server variable to listen instead of app
