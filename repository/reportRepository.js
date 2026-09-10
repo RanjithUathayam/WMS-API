@@ -4,8 +4,13 @@ const { QueryTypes } = require('sequelize');
 const MASTER_PART_JOIN = `LEFT JOIN Master_Part mp WITH (NOLOCK) ON mp.ItemCode = %ALIAS%.ItemCode AND (mp.isDelete = 0 OR mp.isDelete IS NULL)`;
 const MASTER_PART_SELECT = `mp.ItemCode AS MasterItemCode, mp.ItemName AS MasterItemName, mp.ItemGroup AS MasterItemGroup, mp.Category AS Category, mp.Description AS Description, mp.Color AS Color, mp.Size AS Size, mp.Style AS Style, mp.BinCapacity AS BinCapacity`;
 
-/** Runs a paged data query + a matching COUNT(*) query against the same FROM/JOIN/WHERE (and GROUP BY, if any). */
-async function runPagedQuery({ selectColumns, fromJoin, whereSql, groupBy, orderBy, replacements, offset, pageSize }) {
+/**
+ * Runs a paged data query + a matching COUNT(*) query against the same FROM/JOIN/WHERE (and GROUP BY, if any).
+ * When `sumSelect` is given (e.g. "SUM(bc.Quantity) AS BinnedQty"), also runs a flat SUM(...) query across every
+ * row matching the same FROM/JOIN/WHERE (ignoring GROUP BY/paging) so totals reflect the whole filtered set, not
+ * just the current page. Sum is associative, so a flat SUM equals the sum of any GROUP BY'd per-row sums.
+ */
+async function runPagedQuery({ selectColumns, fromJoin, whereSql, groupBy, orderBy, replacements, offset, pageSize, sumSelect }) {
     const dataSql = `
         SELECT ${selectColumns}
         FROM ${fromJoin}
@@ -18,11 +23,21 @@ async function runPagedQuery({ selectColumns, fromJoin, whereSql, groupBy, order
         ? `SELECT COUNT(*) AS Total FROM (SELECT 1 AS x FROM ${fromJoin} ${whereSql} GROUP BY ${groupBy}) t`
         : `SELECT COUNT(*) AS Total FROM ${fromJoin} ${whereSql}`;
 
-    const [rows, countRows] = await Promise.all([
+    const queries = [
         sequelize.query(dataSql, { replacements: { ...replacements, offset, pageSize }, type: QueryTypes.SELECT }),
         sequelize.query(countSql, { replacements, type: QueryTypes.SELECT })
-    ]);
-    return { rows, totalRecords: Number(countRows[0].Total) };
+    ];
+    if (sumSelect) {
+        const sumSql = `SELECT ${sumSelect} FROM ${fromJoin} ${whereSql}`;
+        queries.push(sequelize.query(sumSql, { replacements, type: QueryTypes.SELECT }));
+    }
+
+    const [rows, countRows, sumRows] = await Promise.all(queries);
+    return {
+        rows,
+        totalRecords: Number(countRows[0].Total),
+        totals: sumSelect ? sumRows[0] : undefined
+    };
 }
 
 /** Runs the same query as an unpaged, capped TOP(N) — used for export (full filtered set, not one page). */
@@ -69,6 +84,7 @@ function buildPreBinningQuery(filters) {
         `,
         whereSql: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
         groupBy: null,
+        sumSelect: 'SUM(bc.Quantity) AS BinnedQty, SUM(pb.Quantity) AS RequestedQty',
         replacements
     };
 }
@@ -122,6 +138,7 @@ function buildPalletMappingQuery(filters) {
             pmb.PalletMappingBoxID, pmb.BoxNumber, pmb.WarehouseCode, pmb.ItemGroup, pmb.BoxTotalQty, pmb.MappedBy, pmb.MappedAt,
             pi.ItemCode, mp.ItemCode, mp.ItemName, mp.ItemGroup, mp.Category, mp.Description, mp.Color, mp.Size, mp.Style, mp.BinCapacity
         `,
+        sumSelect: 'SUM(pi.Qty) AS ItemQty',
         replacements
     };
 }
@@ -223,6 +240,7 @@ function buildInventoryDetailsQuery(filters) {
         `,
         whereSql: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
         groupBy: null,
+        sumSelect: 'SUM(inv.Quantity) AS Quantity, SUM(inv.AllocatedQty) AS AllocatedQty',
         replacements
     };
 }

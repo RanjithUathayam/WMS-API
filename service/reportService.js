@@ -49,6 +49,16 @@ function buildPagination(page, pageSize, totalRecords) {
     };
 }
 
+/** Converts a raw SUM(...) result row into camelCase totals, defaulting missing/NULL sums to 0. */
+function toTotals(totals, keyMap) {
+    const result = {};
+    Object.keys(keyMap).forEach((sqlKey) => {
+        const value = totals ? totals[sqlKey] : undefined;
+        result[keyMap[sqlKey]] = value !== undefined && value !== null ? Number(value) : 0;
+    });
+    return result;
+}
+
 function buildItemMaster(row) {
     if (!row.MasterItemCode) return null;
     return {
@@ -127,8 +137,12 @@ async function getPreBinningReportAsync(query) {
     const { page, pageSize, offset } = normalizePaging(query);
     const orderBy = resolveSort(query, PREBINNING_SORT_COLUMNS, PREBINNING_DEFAULT_ORDER);
 
-    const { rows, totalRecords } = await repository.getPreBinningReport(filters, { offset, pageSize, orderBy });
-    return { data: rows.map(toPreBinningDto), pagination: buildPagination(page, pageSize, totalRecords) };
+    const { rows, totalRecords, totals } = await repository.getPreBinningReport(filters, { offset, pageSize, orderBy });
+    return {
+        data: rows.map(toPreBinningDto),
+        pagination: buildPagination(page, pageSize, totalRecords),
+        totals: toTotals(totals, { BinnedQty: 'binnedQty', RequestedQty: 'requestedQty' })
+    };
 }
 
 async function getPreBinningReportExportAsync(query) {
@@ -197,8 +211,12 @@ async function getPalletMappingReportAsync(query) {
     const { page, pageSize, offset } = normalizePaging(query);
     const orderBy = resolveSort(query, PALLETMAPPING_SORT_COLUMNS, PALLETMAPPING_DEFAULT_ORDER);
 
-    const { rows, totalRecords } = await repository.getPalletMappingReport(filters, { offset, pageSize, orderBy });
-    return { data: rows.map(toPalletMappingDto), pagination: buildPagination(page, pageSize, totalRecords) };
+    const { rows, totalRecords, totals } = await repository.getPalletMappingReport(filters, { offset, pageSize, orderBy });
+    return {
+        data: rows.map(toPalletMappingDto),
+        pagination: buildPagination(page, pageSize, totalRecords),
+        totals: toTotals(totals, { ItemQty: 'itemQty' })
+    };
 }
 
 async function getPalletMappingReportExportAsync(query) {
@@ -334,8 +352,12 @@ async function getInventoryDetailsReportAsync(query) {
     const { page, pageSize, offset } = normalizePaging(query);
     const orderBy = resolveSort(query, INVENTORY_SORT_COLUMNS, INVENTORY_DEFAULT_ORDER);
 
-    const { rows, totalRecords } = await repository.getInventoryDetailsReport(filters, { offset, pageSize, orderBy });
-    return { data: rows.map(toInventoryDetailsDto), pagination: buildPagination(page, pageSize, totalRecords) };
+    const { rows, totalRecords, totals } = await repository.getInventoryDetailsReport(filters, { offset, pageSize, orderBy });
+    return {
+        data: rows.map(toInventoryDetailsDto),
+        pagination: buildPagination(page, pageSize, totalRecords),
+        totals: toTotals(totals, { Quantity: 'quantity', AllocatedQty: 'allocatedQty' })
+    };
 }
 
 async function getInventoryDetailsReportExportAsync(query) {

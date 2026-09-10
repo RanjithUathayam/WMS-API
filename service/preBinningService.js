@@ -58,7 +58,8 @@ function validateScanRequest(body) {
             grnNo: parsed.grnNo,
             itemGroup: parsed.itemGroup,
             uniqueNumber: parsed.uniqueNumber,
-            qty: parsed.qty
+            qty: parsed.qty,
+            confirmNewItem: body.confirmNewItem
         };
     }
 
@@ -84,7 +85,8 @@ function validateScanRequest(body) {
         grnNo: String(source.grnNo).trim(),
         itemGroup: String(source.itemGroup).trim(),
         uniqueNumber: String(source.uniqueNumber).trim(),
-        qty
+        qty,
+        confirmNewItem: !!source.confirmNewItem
     };
 }
 
@@ -171,10 +173,18 @@ async function scanItemAsync(rawRequest, user) {
         const state = describeBoxState(box, request.whsCode);
         if (!state.exists) box = null;
 
-        // 3 — ItemCode must exist in the selected warehouse (OITW + OITM, WhsCode + ItemCode only)
-        const stock = await repository.lockWarehouseItemStock(transaction, request.whsCode, request.itemCode);
-        if (!stock) {
-            throw new PreBinningError('ITEM_NOT_AVAILABLE', `Item ${request.itemCode} is not available in warehouse ${request.whsCode}.`);
+        // 3 — ItemCode must exist in the selected warehouse (OITW + OITM, WhsCode + ItemCode only).
+        // If it doesn't, and the scanner has explicitly confirmed adding it as a new item (after
+        // being prompted client-side), the scan proceeds with on-hand treated as 0 — the same way
+        // an existing-but-short OITW row is already handled below. This never writes back to SAP's
+        // OITW; it's purely a pre-binning-side acknowledgement that the item wasn't stocked here yet.
+        let stock = await repository.lockWarehouseItemStock(transaction, request.whsCode, request.itemCode);
+        const isNewItemInWarehouse = !stock;
+        if (isNewItemInWarehouse) {
+            if (!request.confirmNewItem) {
+                throw new PreBinningError('ITEM_NOT_AVAILABLE', `Item ${request.itemCode} is not available in warehouse ${request.whsCode}.`);
+            }
+            stock = { OnHand: 0 };
         }
 
         // 4 — Unique number (scoped to ItemCode + GRNNo — the same number can recur under a different item or GRN)
@@ -239,6 +249,7 @@ async function scanItemAsync(rawRequest, user) {
             scannedQty: request.qty,
             warehouseAvailableQty,
             extraQty,
+            isNewItemInWarehouse,
             boxTotalQty: Number(box.TotalQty) + request.qty
         };
     });

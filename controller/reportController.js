@@ -27,8 +27,8 @@ function makeReportHandler(reportName, getPageAsync, getExportAsync) {
                 await exportData(res, req.query.exportFormat, reportName, JSON.stringify(columns), rows);
                 return;
             }
-            const { data, pagination } = await getPageAsync(req.query);
-            return res.status(200).json({ success: true, data, pagination });
+            const { data, pagination, totals } = await getPageAsync(req.query);
+            return res.status(200).json({ success: true, data, pagination, totals });
         } catch (error) {
             return handleError(res, error);
         }
