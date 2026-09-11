@@ -20,7 +20,14 @@ const PRINTABLE_STATUSES = ['Reserved', 'Failed'];
 
 // Fallback capability bounds for a printer with no T_LABEL_PRINT_CONFIG profile yet (e.g. one the OS
 // just reported that nobody has registered/print-tuned before) — matches the spec's stated defaults.
-const DEFAULT_CAPABILITY = { minDensity: 1, maxDensity: 15, minSpeed: 1, maxSpeed: 4, supportsGap: true, supportsOffset: true };
+// Keyed by printer Language since TSPL and ZPL printers use different darkness/speed scales entirely
+// (TSPL DENSITY is 0-15; ZPL darkness (~SD) is 0-30) — using the TSPL range for an unconfigured Zebra
+// printer wouldn't fail outright, but would cap it far below what it's actually capable of.
+const DEFAULT_CAPABILITY_BY_LANGUAGE = {
+    TSPL: { minDensity: 1, maxDensity: 15, minSpeed: 1, maxSpeed: 4, supportsGap: true, supportsOffset: true, defaultDensity: 10, defaultSpeed: 2 },
+    ZPL: { minDensity: 0, maxDensity: 30, minSpeed: 2, maxSpeed: 12, supportsGap: true, supportsOffset: true, defaultDensity: 15, defaultSpeed: 4 }
+};
+const DEFAULT_CAPABILITY = DEFAULT_CAPABILITY_BY_LANGUAGE.TSPL;
 const DEFAULT_GAP_MM = 3;
 const DEFAULT_OFFSET_MM = 0;
 const DEFAULT_LABEL_WIDTH_MM = 90;
@@ -170,28 +177,38 @@ function validateMfgDate(value) {
 /**
  * Resolves and validates every print-time setting (section 3-5 of the spec): printerName, mfgDate,
  * density, speed, gapMm, offsetMm, labelWidthMm, labelHeightMm. Bounds come from that printer's
- * T_LABEL_PRINT_CONFIG capability row when one exists, else the spec's stated defaults — so a printer
- * nobody has configured yet still gets sane validation instead of being rejected outright.
+ * T_LABEL_PRINT_CONFIG capability row when one exists, else defaults for that printer's Language — so
+ * a printer nobody has configured yet still gets sane validation instead of being rejected outright.
+ *
+ * `language` (TSPL/ZPL) is resolved here too — from the capability row's own Language column when one
+ * exists, else inferred from the printer's name (printerCommandService.inferPrinterLanguage) — and
+ * returned as part of the settings so printLabelsAsync can build the right command syntax for this
+ * specific printer instead of always assuming TSPL.
  */
 async function resolvePrintSettings(body, printerName) {
     const capabilityRow = await sequenceRepository.getPrinterCapabilityByName(printerName);
 
+    const language = String(
+        (capabilityRow && capabilityRow.Language) || printerCommand.inferPrinterLanguage(printerName) || 'TSPL'
+    ).toUpperCase();
+    const languageDefaults = DEFAULT_CAPABILITY_BY_LANGUAGE[language] || DEFAULT_CAPABILITY;
+
     // Guards against the LabelPrinterCapability_Schema.sql migration not having been run yet: a row
     // can exist (from before that migration) with the new columns simply absent/undefined, which
-    // must fall back to DEFAULT_CAPABILITY rather than silently disabling range validation.
+    // must fall back to languageDefaults rather than silently disabling range validation.
     const hasCapabilityColumns = !!capabilityRow && capabilityRow.MinDensity !== undefined && capabilityRow.MinDensity !== null;
     const capability = hasCapabilityColumns ? {
         minDensity: capabilityRow.MinDensity, maxDensity: capabilityRow.MaxDensity,
         minSpeed: capabilityRow.MinSpeed, maxSpeed: capabilityRow.MaxSpeed,
         supportsGap: !!capabilityRow.SupportsGap, supportsOffset: !!capabilityRow.SupportsOffset
-    } : DEFAULT_CAPABILITY;
+    } : languageDefaults;
 
     const density = validateInteger(
-        body.density === undefined ? (capabilityRow && capabilityRow.Density != null ? capabilityRow.Density : 10) : body.density,
+        body.density === undefined ? (capabilityRow && capabilityRow.Density != null ? capabilityRow.Density : languageDefaults.defaultDensity) : body.density,
         'density', { min: capability.minDensity, max: capability.maxDensity }
     );
     const speed = validateInteger(
-        body.speed === undefined ? (capabilityRow && capabilityRow.Speed != null ? capabilityRow.Speed : 2) : body.speed,
+        body.speed === undefined ? (capabilityRow && capabilityRow.Speed != null ? capabilityRow.Speed : languageDefaults.defaultSpeed) : body.speed,
         'speed', { min: capability.minSpeed, max: capability.maxSpeed }
     );
 
@@ -230,7 +247,7 @@ async function resolvePrintSettings(body, printerName) {
         throw new LabelReservationError('VALIDATION_ERROR', 'rotation must be one of 0, 90, 180, 270.');
     }
 
-    return { density, speed, gapMm, offsetMm, labelWidthMm, labelHeightMm, mfgDate, dpi, rotation };
+    return { density, speed, gapMm, offsetMm, labelWidthMm, labelHeightMm, mfgDate, dpi, rotation, language };
 }
 
 /**
@@ -317,9 +334,12 @@ async function printLabelsAsync(body) {
             repository.updateReservationsStatus(transaction, [labelNumber], 'Printing', { copies: copiesByNumber.get(labelNumber), printerName })
         ));
 
-        let tsplCommand;
+        let printCommand;
         try {
-            tsplCommand = printerCommand.buildTsplCommand({
+            // buildPrintCommand dispatches to TSPL or ZPL syntax by settings.language (resolved in
+            // resolvePrintSettings) — sending the wrong language to a printer is exactly why a Zebra
+            // printer previously appeared to "not print" at all despite the job completing here.
+            printCommand = printerCommand.buildPrintCommand({
                 ...settings,
                 ...printableArea,
                 printerName,
@@ -332,11 +352,11 @@ async function printLabelsAsync(body) {
                 // and axis exceeded the printable area rather than silently clamping/warning.
                 throw new LabelReservationError('PRINTABLE_AREA_EXCEEDED', error.message);
             }
-            throw new LabelReservationError('PRINT_COMMAND_GENERATION_FAILED', 'Unable to generate the printer command for this label set.');
+            throw new LabelReservationError('PRINT_COMMAND_GENERATION_FAILED', error.message || 'Unable to generate the printer command for this label set.');
         }
 
         const updated = await repository.lockReservationsByLabelNumbers(transaction, labelNumbers);
-        return { updated, tsplCommand };
+        return { updated, printCommand };
     });
 
     // Durable per-printer defaults (spec section 9) — best-effort; a failure here shouldn't undo an
@@ -356,7 +376,7 @@ async function printLabelsAsync(body) {
             labelCount: result.updated.length,
             totalPhysicalPrints,
             labels: result.updated.map(mapReservationRow),
-            command: result.tsplCommand
+            command: result.printCommand
         }
     };
 }

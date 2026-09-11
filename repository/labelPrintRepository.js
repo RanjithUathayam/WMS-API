@@ -36,7 +36,7 @@ async function getPrinterCapabilityByName(printerName) {
  * — inserts a profile row (with the standard capability defaults) the first time this printer name is
  * seen, so an OS-detected printer that was never pre-registered still gets one after its first print.
  */
-async function upsertPrinterLastUsedSettings(printerName, { density, speed, gapMm, offsetMm }) {
+async function upsertPrinterLastUsedSettings(printerName, { density, speed, gapMm, offsetMm, language }) {
     const updated = await sequelize.query(`
         UPDATE T_LABEL_PRINT_CONFIG
         SET Density = :density, Speed = :speed, GapMm = :gapMm, OffsetMm = :offsetMm, UpdatedAt = GETDATE()
@@ -48,13 +48,23 @@ async function upsertPrinterLastUsedSettings(printerName, { density, speed, gapM
 
     const affected = updated[1];
     if (!affected) {
+        // Capability bounds (Min/MaxDensity, Min/MaxSpeed) here MUST match whichever language this
+        // printer actually is — a Zebra printer first-seen with the TSPL bounds hard-coded here used
+        // to get silently capped at density 15 (ZPL darkness goes to 30) and, worse, get tagged
+        // Language='TSPL' forever, which is exactly what caused the wrong command syntax to keep
+        // being sent to it on every print after the first.
+        const resolvedLanguage = language === 'ZPL' ? 'ZPL' : 'TSPL';
+        const bounds = resolvedLanguage === 'ZPL'
+            ? { minDensity: 0, maxDensity: 30, minSpeed: 2, maxSpeed: 12 }
+            : { minDensity: 1, maxDensity: 15, minSpeed: 1, maxSpeed: 4 };
+
         await sequelize.query(`
             INSERT INTO T_LABEL_PRINT_CONFIG
                 (PrinterName, Density, Speed, GapMm, OffsetMm, IsActive, PrinterType, Language, MinDensity, MaxDensity, MinSpeed, MaxSpeed, SupportsGap, SupportsOffset)
             VALUES
-                (:printerName, :density, :speed, :gapMm, :offsetMm, 1, 'Thermal', 'TSPL', 1, 15, 1, 4, 1, 1)
+                (:printerName, :density, :speed, :gapMm, :offsetMm, 1, 'Thermal', :language, :minDensity, :maxDensity, :minSpeed, :maxSpeed, 1, 1)
         `, {
-            replacements: { printerName, density, speed, gapMm, offsetMm },
+            replacements: { printerName, density, speed, gapMm, offsetMm, language: resolvedLanguage, ...bounds },
             type: QueryTypes.INSERT
         });
     }

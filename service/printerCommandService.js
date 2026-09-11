@@ -1,6 +1,8 @@
-// TSC TTP-244 Pro / TE210 / TE310 are all TSPL-compatible thermal printers — this module only
-// targets TSPL for now. Extend inferPrinterLanguage + a new buildXxxCommand() function if/when a
-// ZPL or EPL printer needs supporting — do not bolt other languages onto buildTsplCommand itself.
+// TSC TTP-244 Pro / TE210 / TE310 speak TSPL; Zebra printers (e.g. ZD230) speak ZPL instead — the two
+// command languages are not compatible, so sending TSPL to a Zebra printer (or vice versa) silently
+// fails to produce a label. buildPrintCommand() below is the single entry point every caller should
+// use — it picks buildTsplCommand vs buildZplCommand from the printer's Language, and throws rather
+// than silently guessing for a language neither builder supports (EPL/WINDOWS/PDF).
 
 class PrintableAreaError extends Error {
     constructor(message, details) {
@@ -169,10 +171,102 @@ function buildTsplCommand({
     return lines.join('\r\n') + '\r\n';
 }
 
+// ZPL field orientation letters for the four TSPL-style rotation values this app accepts.
+const ZPL_ROTATION = { 0: 'N', 90: 'R', 180: 'I', 270: 'B' };
+
+/**
+ * Builds one ZPL II command stream for a batch of labels — the ZPL equivalent of buildTsplCommand
+ * above, for Zebra printers (e.g. ZD230). Uses the exact same printable-area geometry/validation
+ * (assertWithinPrintableArea, QR_FOOTPRINT_MM, TEXT_HEIGHT_MM, TEXT_CHAR_WIDTH_MM) as buildTsplCommand
+ * — that math is just millimeters/dots, not TSPL-specific — only the emitted command syntax differs.
+ *
+ * Gap distance has no direct ZPL equivalent to TSPL's `GAP x,y` (ZPL relies on the printer's own gap
+ * sensor + label length calibration, done once on the printer itself via ~JC or its front panel) —
+ * `^MNY` just tells the printer to use gap/web sensing; gapMm is otherwise not sent per job.
+ *
+ * Not verified against physical Zebra hardware (no ZD230 was reachable in the environment this was
+ * built in) — the command structure follows the ZPL II Programming Guide, but darkness/speed
+ * numbers a real ZD230 accepts may need tuning; verify against real hardware before relying on this
+ * in production, same caveat as printerDetectionService.sendRawToPrinterAsync.
+ */
+function buildZplCommand({
+    labelWidthMm, labelHeightMm, offsetMm, density, speed, labels,
+    printableXMm = 0, printableWidthMm = labelWidthMm,
+    dpi = DEFAULT_DPI, rotation = 0, printerName
+}) {
+    if (printableWidthMm <= 0 || printableXMm < 0 || printableXMm + printableWidthMm > labelWidthMm) {
+        throw new Error(`Invalid printable area (x=${printableXMm}mm, width=${printableWidthMm}mm) for a ${labelWidthMm}mm-wide label.`);
+    }
+
+    const widthDots = mmToDots(labelWidthMm, dpi);
+    const heightDots = mmToDots(labelHeightMm, dpi);
+    const offsetYDots = mmToDots(offsetMm, dpi);
+    const zplRotation = ZPL_ROTATION[rotation] || 'N';
+    const textHeightDots = mmToDots(TEXT_HEIGHT_MM, dpi);
+    const textWidthDots = mmToDots(TEXT_CHAR_WIDTH_MM, dpi);
+
+    // Same coordinate math as buildTsplCommand (see its own comments for why it's relative to
+    // printableXMm rather than the label's raw origin).
+    const margin = Math.min(CONTENT_MARGIN_MM, printableWidthMm / 4);
+    const qrXMm = printableXMm + margin;
+    const qrYMm = 4 + offsetMm;
+    const textXMm = printableXMm + margin;
+    const textYMm = qrYMm + QR_FOOTPRINT_MM + CONTENT_SPACING_MM;
+
+    // ~SD is an immediate ("tilde") command setting ABSOLUTE media darkness (0-30) — unlike ^MD, which
+    // only nudges darkness relative to whatever it currently is — so it's sent once, outside any
+    // ^XA/^XZ format, the same way DENSITY is set once for the whole TSPL batch.
+    const blocks = [`~SD${density}`];
+
+    for (const label of labels) {
+        const textWidthMm = String(label.labelNumber).length * TEXT_CHAR_WIDTH_MM;
+
+        assertWithinPrintableArea({ printableXMm, printableWidthMm, labelHeightMm, qrXMm, qrYMm, textXMm, textYMm, textWidthMm });
+
+        logCalculation({
+            printer: printerName, language: 'ZPL', dpi, labelWidthMm, labelHeightMm,
+            printableXMm, printableWidthMm, offsetMm, rotation,
+            label: label.labelNumber,
+            qr: { xMm: qrXMm, yMm: qrYMm, xDots: mmToDots(qrXMm, dpi), yDots: mmToDots(qrYMm, dpi) },
+            text: { xMm: textXMm, yMm: textYMm, xDots: mmToDots(textXMm, dpi), yDots: mmToDots(textYMm, dpi) }
+        });
+
+        const copies = Math.max(1, Number(label.copies) || 1);
+        blocks.push([
+            '^XA',
+            `^PW${widthDots}`,
+            `^LL${heightDots}`,
+            '^MNY', // non-continuous (gap/web sensing) media — the die-cut label stock this app targets
+            `^PR${speed}`,
+            `^LH0,${offsetYDots}`,
+            `^FO${mmToDots(qrXMm, dpi)},${mmToDots(qrYMm, dpi)}^BQN,2,${QR_CELL_WIDTH_DOTS}^FDQA,${label.qrValue}^FS`,
+            `^FO${mmToDots(textXMm, dpi)},${mmToDots(textYMm, dpi)}^A0${zplRotation},${textHeightDots},${textWidthDots}^FD${label.labelNumber}^FS`,
+            `^PQ${copies}`,
+            '^XZ'
+        ].join('\r\n'));
+    }
+
+    return blocks.join('\r\n') + '\r\n';
+}
+
+/** Single entry point for print-command generation — dispatches to buildTsplCommand/buildZplCommand
+ *  by the printer's actual Language (T_LABEL_PRINT_CONFIG.Language), falling back to inferring it from
+ *  the printer's name only when no capability row/explicit language is known. Throws rather than
+ *  silently defaulting to TSPL for a language it can't build (EPL/WINDOWS/PDF) — that silent fallback
+ *  was the original bug: every printer, Zebra included, was always getting TSPL regardless. */
+function buildPrintCommand(options) {
+    const language = String(options.language || inferPrinterLanguage(options.printerName) || 'TSPL').toUpperCase();
+    if (language === 'TSPL') return buildTsplCommand(options);
+    if (language === 'ZPL') return buildZplCommand(options);
+    throw new Error(`Unsupported printer language "${language}" for ${options.printerName || 'this printer'}. Only TSPL and ZPL are currently supported.`);
+}
+
 module.exports = {
     PrintableAreaError,
     DEFAULT_DPI,
     mmToDots,
     inferPrinterLanguage,
-    buildTsplCommand
+    buildTsplCommand,
+    buildZplCommand,
+    buildPrintCommand
 };
