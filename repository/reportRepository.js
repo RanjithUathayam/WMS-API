@@ -255,6 +255,51 @@ async function getInventoryDetailsReportForExport(filters, { orderBy, maxRows })
     return runFullQuery({ ...q, orderBy, maxRows });
 }
 
+// ---------------------------------------------------------------------------
+// Picking History Report — T_PICKING_HISTORY (one row per completed picking
+// transaction) left-joined to Master_Part for item name.
+// ---------------------------------------------------------------------------
+function buildPickingHistoryQuery(filters) {
+    const conditions = [];
+    const replacements = {};
+
+    if (filters.palletId) { conditions.push('ph.PalletID LIKE :palletId'); replacements.palletId = `%${filters.palletId}%`; }
+    if (filters.boxNumber) { conditions.push('ph.BoxNumber LIKE :boxNumber'); replacements.boxNumber = `%${filters.boxNumber}%`; }
+    if (filters.itemCode) { conditions.push('ph.ItemCode LIKE :itemCode'); replacements.itemCode = `%${filters.itemCode}%`; }
+    if (filters.status) { conditions.push('ph.Status = :status'); replacements.status = filters.status; }
+    if (filters.pickedBy) { conditions.push('ph.PickedBy LIKE :pickedBy'); replacements.pickedBy = `%${filters.pickedBy}%`; }
+    if (filters.fromDate) { conditions.push('CAST(ph.PickedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
+    if (filters.toDate) { conditions.push('CAST(ph.PickedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
+
+    return {
+        selectColumns: `
+            ph.PickingID AS PickingID, ph.InventoryID AS InventoryID, ph.PalletMappingID AS PalletMappingID,
+            ph.PalletID AS PalletID, ph.BoxNumber AS BoxNumber, ph.ItemCode AS ItemCode, ph.ItemGroup AS ItemGroup,
+            ph.WarehouseCode AS WarehouseCode, ph.LocationCode AS LocationCode, ph.PickedQty AS PickedQty,
+            ph.RemainingQty AS RemainingQty, ph.Status AS Status, ph.PickedBy AS PickedBy, ph.PickedAt AS PickedAt,
+            ${MASTER_PART_SELECT}
+        `,
+        fromJoin: `
+            T_PICKING_HISTORY ph WITH (NOLOCK)
+            ${MASTER_PART_JOIN.replace('%ALIAS%', 'ph')}
+        `,
+        whereSql: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+        groupBy: null,
+        sumSelect: 'SUM(ph.PickedQty) AS PickedQty',
+        replacements
+    };
+}
+
+async function getPickingHistoryReport(filters, { offset, pageSize, orderBy }) {
+    const q = buildPickingHistoryQuery(filters);
+    return runPagedQuery({ ...q, orderBy, offset, pageSize });
+}
+
+async function getPickingHistoryReportForExport(filters, { orderBy, maxRows }) {
+    const q = buildPickingHistoryQuery(filters);
+    return runFullQuery({ ...q, orderBy, maxRows });
+}
+
 module.exports = {
     getPreBinningReport,
     getPreBinningReportForExport,
@@ -263,5 +308,7 @@ module.exports = {
     getLocationMappingReport,
     getLocationMappingReportForExport,
     getInventoryDetailsReport,
-    getInventoryDetailsReportForExport
+    getInventoryDetailsReportForExport,
+    getPickingHistoryReport,
+    getPickingHistoryReportForExport
 };

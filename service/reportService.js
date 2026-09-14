@@ -367,6 +367,77 @@ async function getInventoryDetailsReportExportAsync(query) {
     return { rows, columns: INVENTORY_EXPORT_COLUMNS };
 }
 
+// ---------------------------------------------------------------------------
+// Picking History Report
+// ---------------------------------------------------------------------------
+const PICKINGHISTORY_SORT_COLUMNS = {
+    palletId: 'PalletID', boxNumber: 'BoxNumber', itemCode: 'ItemCode', pickedQty: 'PickedQty',
+    status: 'Status', pickedBy: 'PickedBy', pickedAt: 'PickedAt'
+};
+const PICKINGHISTORY_DEFAULT_ORDER = 'PickedAt DESC';
+const PICKINGHISTORY_EXPORT_COLUMNS = [
+    { header: 'Picking ID', data: 'PickingID' }, { header: 'Pallet ID', data: 'PalletID' },
+    { header: 'Box Number', data: 'BoxNumber' }, { header: 'Item Code', data: 'ItemCode' },
+    { header: 'Warehouse', data: 'WarehouseCode' }, { header: 'Location', data: 'LocationCode' },
+    { header: 'Picked Qty', data: 'PickedQty' }, { header: 'Remaining Qty', data: 'RemainingQty' },
+    { header: 'Status', data: 'Status' }, { header: 'Picked By', data: 'PickedBy' }, { header: 'Picked At', data: 'PickedAt' },
+    { header: 'Master Item Name', data: 'MasterItemName' }, { header: 'Master Item Group', data: 'MasterItemGroup' },
+    { header: 'Category', data: 'Category' }, { header: 'Description', data: 'Description' }, { header: 'Color', data: 'Color' },
+    { header: 'Size', data: 'Size' }, { header: 'Style', data: 'Style' }, { header: 'Bin Capacity', data: 'BinCapacity' }
+];
+
+function toPickingHistoryFilters(query) {
+    return {
+        palletId: trimOrUndefined(query.palletId),
+        boxNumber: trimOrUndefined(query.boxNumber),
+        itemCode: trimOrUndefined(query.itemCode),
+        status: trimOrUndefined(query.status),
+        pickedBy: trimOrUndefined(query.user || query.pickedBy),
+        fromDate: trimOrUndefined(query.fromDate),
+        toDate: trimOrUndefined(query.toDate)
+    };
+}
+
+function toPickingHistoryDto(row) {
+    return {
+        pickingId: row.PickingID,
+        inventoryId: row.InventoryID,
+        palletMappingId: row.PalletMappingID,
+        palletId: row.PalletID,
+        boxNumber: row.BoxNumber,
+        itemCode: row.ItemCode,
+        itemGroup: row.ItemGroup || null,
+        warehouseCode: row.WarehouseCode || null,
+        locationCode: row.LocationCode || null,
+        pickedQty: row.PickedQty !== null && row.PickedQty !== undefined ? Number(row.PickedQty) : null,
+        remainingQty: row.RemainingQty !== null && row.RemainingQty !== undefined ? Number(row.RemainingQty) : null,
+        status: row.Status,
+        pickedBy: row.PickedBy,
+        pickedAt: row.PickedAt,
+        itemMaster: buildItemMaster(row)
+    };
+}
+
+async function getPickingHistoryReportAsync(query) {
+    const filters = toPickingHistoryFilters(query);
+    const { page, pageSize, offset } = normalizePaging(query);
+    const orderBy = resolveSort(query, PICKINGHISTORY_SORT_COLUMNS, PICKINGHISTORY_DEFAULT_ORDER);
+
+    const { rows, totalRecords, totals } = await repository.getPickingHistoryReport(filters, { offset, pageSize, orderBy });
+    return {
+        data: rows.map(toPickingHistoryDto),
+        pagination: buildPagination(page, pageSize, totalRecords),
+        totals: toTotals(totals, { PickedQty: 'pickedQty' })
+    };
+}
+
+async function getPickingHistoryReportExportAsync(query) {
+    const filters = toPickingHistoryFilters(query);
+    const orderBy = resolveSort(query, PICKINGHISTORY_SORT_COLUMNS, PICKINGHISTORY_DEFAULT_ORDER);
+    const rows = await repository.getPickingHistoryReportForExport(filters, { orderBy, maxRows: MAX_EXPORT_ROWS });
+    return { rows, columns: PICKINGHISTORY_EXPORT_COLUMNS };
+}
+
 module.exports = {
     ReportError,
     getPreBinningReportAsync,
@@ -376,5 +447,7 @@ module.exports = {
     getLocationMappingReportAsync,
     getLocationMappingReportExportAsync,
     getInventoryDetailsReportAsync,
-    getInventoryDetailsReportExportAsync
+    getInventoryDetailsReportExportAsync,
+    getPickingHistoryReportAsync,
+    getPickingHistoryReportExportAsync
 };

@@ -35,6 +35,7 @@ All API routes are mounted under `/api`:
 | `/api/location` | `routes/locationRoutes.js` | ✅ Yes |
 | `/api/location-mapping` | `routes/locationMappingRoutes.js` | ✅ Yes |
 | `/api/pallet-mapping` | `routes/palletMappingRoutes.js` | ✅ Yes |
+| `/api/picking` | `routes/pickingRoutes.js` | ✅ Yes |
 
 > ⚠️ `/api/masterExport` and `/api/data` are **not wrapped in `authenticateToken`** at the `app.js` level, so they are reachable without a token. The frontend can call them without an `authenticatetoken` header, but this is also worth flagging to backend owners as a likely gap.
 
@@ -453,6 +454,94 @@ Error codes → HTTP status: `MISSING_FIELDS` (400), `LOCATION_NOT_FOUND` (404),
 
 ---
 
+### 4.16 Picking — mount `/api/picking` (`routes/pickingRoutes.js` → `controller/pickingController.js` → `service/pickingService.js`)
+
+Uses **Style B** envelopes. Picks item quantity out of `T_INVENTORY` for an already-location-mapped pallet (§4.15 must have run first — `T_INVENTORY` rows only exist after a pallet is mapped to a location). `PalletNumber`/`palletId` and `BoxNumber`/`boxId` are accepted interchangeably in request bodies — `PalletNumber` is the same value as Pallet Mapping's `PalletID`.
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| POST | `/api/picking/pick/pallet` | `{ palletNumber }` | **Scan Pallet.** Validates the pallet is eligible for picking (its Pallet Mapping must be `COMPLETED` and not yet fully picked) and returns every still-pickable box/item line on it. |
+| POST | `/api/picking/pick/box` | `{ palletNumber, boxNumber }` | **Scan Box.** Validates the box exists, belongs to the scanned pallet, and still has at least one pickable line. |
+| POST | `/api/picking/pick/complete` | `{ palletNumber, boxNumber, itemCode, pickedQuantity }` | **Complete Picking.** The only mutating call — deducts `pickedQuantity` from the matching `T_INVENTORY` row, writes one `T_PICKING_HISTORY` row, and rolls the pallet's picking status forward. `pickedBy` is always the authenticated user (`req.user.UserName`) — any `userId`/`UserID` field in the body is accepted but ignored, matching every other module's `CreatedBy`/`MappedBy`/`CompletedBy` convention. |
+
+`toInventoryLineDto` shape (used by both Scan Pallet's `items[]` and Scan Box's `items[]`):
+```jsonc
+{
+  "inventoryId": 10, "palletMappingId": 1, "palletId": "PLT-0001",
+  "boxNumber": "BOX-0001", "itemCode": "ITM-1", "itemName": "Widget", "itemGroup": "GRP",
+  "availableQty": 10, "allocatedQty": 0, "pickableQty": 10,
+  "warehouseCode": "WH1", "rowCode": "A", "locationId": 5, "locationCode": "WH1-A-005",
+  "pickingStatus": "PENDING" // or "PICKED" once that line's Quantity has been fully picked
+}
+```
+
+Scan Pallet response `data`:
+```jsonc
+{
+  "palletMappingId": 1, "palletId": "PLT-0001", "palletNumber": "PLT-0001",
+  "palletStatus": "COMPLETED", // Pallet Mapping's own status — always COMPLETED to reach picking
+  "pickingStatus": "PENDING", // or "IN_PROGRESS" / "COMPLETED" — the pallet's own picking lifecycle
+  "boxNumbers": ["BOX-0001", "BOX-0002"],
+  "items": [ /* toInventoryLineDto, one per pickable (box, item) line */ ]
+}
+```
+
+Complete Picking response `data`:
+```jsonc
+{
+  "picking": {
+    "pickingId": 100, "inventoryId": 10, "palletMappingId": 1, "palletId": "PLT-0001",
+    "boxNumber": "BOX-0001", "itemCode": "ITM-1", "itemGroup": "GRP",
+    "warehouseCode": "WH1", "locationCode": "WH1-A-005",
+    "pickedQty": 4, "remainingQty": 6, "status": "COMPLETED",
+    "pickedBy": "operator1", "pickedAt": "..."
+  },
+  "pallet": { "palletMappingId": 1, "palletId": "PLT-0001", "palletNumber": "PLT-0001", "palletStatus": "COMPLETED", "pickingStatus": "IN_PROGRESS" },
+  "box": { "boxNumber": "BOX-0001", "itemCode": "ITM-1", "remainingQty": 6, "pickingStatus": "PENDING" }
+}
+```
+
+Error codes → HTTP status: `MISSING_FIELDS` (400), `INVALID_PICKED_QUANTITY` (400 — `pickedQuantity` missing/non-numeric/≤0), `PALLET_NOT_FOUND` (404), `PALLET_NOT_AVAILABLE` (409 — pallet mapping isn't `COMPLETED` yet, or the pallet has already been fully picked, or it has no pickable inventory at all), `BOX_NOT_FOUND` (404), `BOX_NOT_IN_PALLET` (409 — box exists but under a different pallet), `ITEM_NOT_FOUND` (404 — box exists on this pallet but not that `itemCode`), `BOX_ALREADY_PICKED` (409 — that box/item line has already been fully picked), `INSUFFICIENT_INVENTORY` (409 — `pickedQuantity` exceeds what's left on that line).
+
+Concurrency/transaction-safety (Complete Picking only — Scan Pallet/Scan Box are read-only): one `sequelize.transaction`, locking the pallet mapping row (`UPDLOCK, ROWLOCK, HOLDLOCK`) and then the single `T_INVENTORY` row for that exact `(PalletMappingID, BoxNumber, ItemCode)` — same fixed lock order (pallet, then the child row) as Pallet Mapping's add-box and Location Mapping. A second concurrent/duplicate request for the same box/item either serializes behind the first and then sees `Status = 'CLEARED'` (→ `BOX_ALREADY_PICKED`), or sees insufficient remaining `Quantity` (→ `INSUFFICIENT_INVENTORY`) — it can never double-deduct. Any thrown error rolls back the whole transaction, so a failed/rejected pick never reduces inventory.
+
+> ⚠️ **Permission table note**: all three `/pick/*` routes key off the `/pick` first path segment (per `authenticateToken.js`'s `moduleNames`) → all three require the single `picking_creates` rights pattern. `/pick` isn't shared with any other module.
+
+Related read endpoint — **Picking History** — is exposed as a Report (§4.17), not under `/api/picking`, following the existing pattern where all filterable/paginated "history" views (Pre-Binning, Pallet Mapping, Location Mapping, Inventory Details) live under `/api/reports`.
+
+---
+
+### 4.17 Reports — Picking History (addition to §4.5... see `/api/reports` mount above)
+
+#### `GET /api/reports/picking`
+Query filters (all optional, same paging/sort/export conventions as the other four reports in §4.14's neighboring report endpoints — `page`, `pageSize`, `sortBy`, `sortDir`, `exportFormat=csv|excel|pdf`):
+
+| Filter | Matches |
+|---|---|
+| `palletId` | `T_PICKING_HISTORY.PalletID LIKE %value%` |
+| `boxNumber` | `T_PICKING_HISTORY.BoxNumber LIKE %value%` |
+| `itemCode` | `T_PICKING_HISTORY.ItemCode LIKE %value%` |
+| `status` | `T_PICKING_HISTORY.Status =` (exact) |
+| `user` (or `pickedBy`) | `T_PICKING_HISTORY.PickedBy LIKE %value%` |
+| `fromDate` / `toDate` | `CAST(PickedAt AS DATE)` range |
+
+Response `data` row shape:
+```jsonc
+{
+  "pickingId": 100, "inventoryId": 10, "palletMappingId": 1, "palletId": "PLT-0001",
+  "boxNumber": "BOX-0001", "itemCode": "ITM-1", "itemGroup": "GRP",
+  "warehouseCode": "WH1", "locationCode": "WH1-A-005",
+  "pickedQty": 4, "remainingQty": 6, "status": "COMPLETED",
+  "pickedBy": "operator1", "pickedAt": "...",
+  "itemMaster": { "itemName": "...", "itemGroup": "...", "category": "...", "..." }
+}
+```
+Plus `pagination` and `totals.pickedQty` (sum across the whole filtered set, not just the current page), same shape as the other reports.
+
+> ⚠️ **Permission table note**: `GET /picking` (under the reports mount) keys off the `/picking` first path segment → requires `report_picking_list`. This is a different string from Picking's own `/pick` segment (§4.16) — no collision, but easy to misread at a glance.
+
+---
+
 ## 5. Known Issues / Gotchas for Frontend Integration
 
 1. **Two response envelope conventions** (§3) — build one adapter per module family, not a single generic response parser.
@@ -467,3 +556,5 @@ Error codes → HTTP status: `MISSING_FIELDS` (400), `LOCATION_NOT_FOUND` (404),
 10. A `PalletID` is single-use for its entire lifetime in Pallet Mapping (§4.14) — once `COMPLETED`, re-validating the same PalletID always fails with `PALLET_ALREADY_COMPLETED`, it never reopens.
 11. **`POST /api/location-mapping/map` (§4.15) is where `T_INVENTORY` rows actually get created** — a pallet's boxes/items exist in Pre-Binning/Pallet Mapping tables beforehand, but nothing appears in Inventory until it's mapped to a location. If a frontend screen expects to see a completed pallet's stock in an inventory list before it's been placed in a bin, that data won't exist yet.
 12. Location Mapping (§4.15) can only ever map a `COMPLETED` Pallet Mapping — there is currently no "unmap"/"relocate" endpoint (the schema reserves `Action = 'UNMAPPED'|'MOVED'` and `Status = 'SUPERSEDED'` for this, per `sql/Location_Schema.sql`'s comments, but no route/service implements it yet). Once mapped, a pallet/location pair can't be changed through the API.
+13. `T_PALLET_MAPPING` now carries **two independent status fields** — don't conflate them: `Status` (`OPEN`/`COMPLETED`) means "has every box been mapped onto this pallet" (§4.14); `PickingStatus` (`NULL`/`PENDING`/`IN_PROGRESS`/`COMPLETED`, added for Picking, §4.16) means "has every item on this pallet now been picked." A pallet must have `Status = 'COMPLETED'` before Picking (§4.16) will even scan it, but its `PickingStatus` is unrelated and tracked separately.
+14. Picking (§4.16) can only ever pick from a pallet that has already been through Location Mapping (§4.15) — `T_INVENTORY` rows (what Picking reads/deducts) don't exist until that step has run, exactly like Inventory Details Report already required (§5 item 11 above).

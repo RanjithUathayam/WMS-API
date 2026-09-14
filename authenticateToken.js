@@ -118,15 +118,22 @@ const authenticateToken = async (req, res, next) => {
     { endpoint: '/pallet',pattern:'palletMapping_list', moduleName: 'Pallet Mapping', type:'List' },
     { endpoint: '/complete',pattern:'palletMapping_creates', moduleName: 'Pallet Mapping Complete', type:'add' },
 
+    // Picking (routes/pickingRoutes.js, mounted at /api/picking). All three routes (Scan Pallet,
+    // Scan Box, Complete Picking) live under one literal first segment '/pick' — checkPermission()
+    // below only keys off that first segment, and '/pick' isn't claimed by any other module, so this
+    // is a dedicated (not shared/fallen-through) permission, one pattern for the whole module.
+    { endpoint: '/pick',pattern:'picking_creates', moduleName: 'Picking', type:'add' },
+
     // Reports (routes/reportRoutes.js, mounted at /api/reports). Read-only, each report gets its
-    // own dedicated pattern — the four segment names below don't collide with any existing
+    // own dedicated pattern — the five segment names below don't collide with any existing
     // moduleNames entry (checked: /pallet, /complete, /box, /details, /inventory, /list, /summary,
     // /map, /warehouse(s), /create, /activate, /deactivate, /positions, /config, /printers, /job,
-    // /print, /retry, /reserveLabelNumbers, /location, /PreBinningApprove, ...).
+    // /print, /retry, /reserveLabelNumbers, /location, /PreBinningApprove, /pick, ...).
     { endpoint: '/prebinning',pattern:'report_preBinning_list', moduleName: 'Pre-Binning Report', type:'List' },
     { endpoint: '/palletmapping',pattern:'report_palletMapping_list', moduleName: 'Pallet Mapping Report', type:'List' },
     { endpoint: '/locationmapping',pattern:'report_locationMapping_list', moduleName: 'Location Mapping Report', type:'List' },
     { endpoint: '/inventorydetails',pattern:'report_inventory_list', moduleName: 'Inventory Details Report', type:'List' },
+    { endpoint: '/picking',pattern:'report_picking_list', moduleName: 'Picking History Report', type:'List' },
 
     // Label Print Configuration & Printing (routes/labelPrintRoutes.js, mounted at /api/label-print).
     // '/job' covers both POST /job (create) and GET /job/:printJobId/preview — same first segment.

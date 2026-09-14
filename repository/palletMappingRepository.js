@@ -12,7 +12,7 @@ function isUniqueViolation(error) {
 /** Most recent mapping (any status) for a PalletID, locked for mutation — used to enforce the single-use-for-life rule and to serialize concurrent validate calls for the same PalletID. */
 async function lockLatestMappingByPalletId(transaction, palletId) {
     const rows = await sequelize.query(`
-        SELECT TOP 1 PalletMappingID, PalletID, TotalBoxCount, Status, CreatedBy, CreatedAt, CompletedBy, CompletedAt
+        SELECT TOP 1 PalletMappingID, PalletID, TotalBoxCount, Status, PickingStatus, CreatedBy, CreatedAt, CompletedBy, CompletedAt
         FROM T_PALLET_MAPPING WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
         WHERE PalletID = :palletId
         ORDER BY PalletMappingID DESC
@@ -41,7 +41,7 @@ async function lockOpenMappingByPalletId(transaction, palletId) {
 /** Latest mapping for a PalletID, unlocked read — used for the GET status endpoint. */
 async function findMappingByPalletId(palletId) {
     const rows = await sequelize.query(`
-        SELECT TOP 1 PalletMappingID, PalletID, TotalBoxCount, Status, CreatedBy, CreatedAt, CompletedBy, CompletedAt
+        SELECT TOP 1 PalletMappingID, PalletID, TotalBoxCount, Status, PickingStatus, CreatedBy, CreatedAt, CompletedBy, CompletedAt
         FROM T_PALLET_MAPPING WITH (NOLOCK)
         WHERE PalletID = :palletId
         ORDER BY PalletMappingID DESC
