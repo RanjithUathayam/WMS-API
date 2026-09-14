@@ -161,20 +161,18 @@ async function lockWarehouseItemStock(transaction, whsCode, itemCode) {
 }
 
 /**
- * T_PREBIN_ITEM no longer stores GRNNo (it's not part of the scan identity and isn't validated
- * during Item Scan), so at box completion the GRNNo required by T_BIN_COMPLETE (NOT NULL) is
- * resolved here instead — the most relevant ERP_Pre_Binning row for this ItemCode + ItemGroup.
- * Ambiguous if an item legitimately spans multiple open GRNs; picks the non-completed, oldest one.
+ * T_PREBIN_ITEM.GRNNo is the authoritative GRNNo (captured at scan time — see insertScannedItem).
+ * This only looks up the matching ERP_Pre_Binning row for the same GRNNo + ItemCode + ItemGroup,
+ * to fill in GRNType/DocNo metadata on T_BIN_COMPLETE — it is not used to guess GRNNo itself.
  */
-async function findGrnForItem(transaction, itemCode, itemGroup) {
+async function findGrnForItem(transaction, itemCode, itemGroup, grnNo) {
     const rows = await sequelize.query(`
         SELECT TOP 1 GRNNo, ItemCode, ItemGroup, Type, DocNo
         FROM ERP_Pre_Binning WITH (NOLOCK)
-        WHERE ItemCode = :itemCode AND ItemGroup = :itemGroup
+        WHERE ItemCode = :itemCode AND ItemGroup = :itemGroup AND GRNNo = :grnNo
           AND (isDelete = 0 OR isDelete IS NULL)
-        ORDER BY CASE WHEN GRNStatus = 'Completed' THEN 1 ELSE 0 END, CreatedDate ASC
     `, {
-        replacements: { itemCode, itemGroup },
+        replacements: { itemCode, itemGroup, grnNo },
         transaction,
         type: QueryTypes.SELECT
     });
@@ -323,23 +321,22 @@ async function getItemCountForBox(transaction, preBinBoxID) {
 }
 
 /**
- * One row per ItemCode/ItemGroup in the box, with the scanned unique numbers grouped in.
- * Grouped by ItemCode + ItemGroup ONLY (not Type) — T_BIN_COMPLETE's real primary key is
- * (BinID, GRNNo, ItemCode), and findGrnForItem resolves the same GRNNo for a given
- * ItemCode + ItemGroup regardless of Type. Grouping by Type as well would emit two INSERTs
- * with the same (BinID, GRNNo, ItemCode) whenever an item is scanned under two Types in the
- * same box, violating that primary key.
+ * One row per ItemCode/ItemGroup/GRNNo in the box, with the scanned unique numbers grouped in.
+ * Grouped by ItemCode + ItemGroup + GRNNo (not Type) — T_BIN_COMPLETE's real primary key is
+ * (BinID, GRNNo, ItemCode). Grouping by Type as well would emit two INSERTs with the same
+ * (BinID, GRNNo, ItemCode) whenever an item is scanned under two Types in the same box,
+ * violating that primary key.
  */
 async function getBoxItemsGroupedForCompletion(transaction, preBinBoxID) {
     return sequelize.query(`
         SELECT
-            i.ItemCode, i.ItemGroup,
+            i.ItemCode, i.ItemGroup, i.GRNNo,
             MAX(i.Type) AS Type,
             CAST(SUM(i.Qty) AS DECIMAL(18,3)) AS Qty,
             STRING_AGG(CONVERT(NVARCHAR(MAX), i.UniqueNumber), ',') AS UniqueNumbers
         FROM T_PREBIN_ITEM i WITH (UPDLOCK, HOLDLOCK)
         WHERE i.PreBinBoxID = :preBinBoxID
-        GROUP BY i.ItemCode, i.ItemGroup
+        GROUP BY i.ItemCode, i.ItemGroup, i.GRNNo
     `, {
         replacements: { preBinBoxID },
         transaction,

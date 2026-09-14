@@ -319,19 +319,19 @@ async function completeBoxAsync({ boxNumber, whsCode }, user) {
 
         // Fixed lock ordering across concurrent completions to avoid deadlocking on shared ERP_Pre_Binning rows.
         groupedLines.sort((a, b) =>
-            `${a.ItemCode}|${a.ItemGroup}`.localeCompare(`${b.ItemCode}|${b.ItemGroup}`)
+            `${a.ItemCode}|${a.ItemGroup}|${a.GRNNo}`.localeCompare(`${b.ItemCode}|${b.ItemGroup}|${b.GRNNo}`)
         );
 
         for (const line of groupedLines) {
-            // T_PREBIN_ITEM doesn't carry GRNNo (unvalidated/unstored during scan) — resolve the
-            // best-matching GRN for this ItemCode + ItemGroup here, for T_BIN_COMPLETE's NOT NULL GRNNo.
-            const grnLine = await repository.findGrnForItem(transaction, line.ItemCode, line.ItemGroup);
+            // GRNNo comes from T_PREBIN_ITEM (captured at scan time). ERP_Pre_Binning is only
+            // consulted for GRNType/DocNo metadata on that same, already-known GRNNo.
+            const grnMeta = await repository.findGrnForItem(transaction, line.ItemCode, line.ItemGroup, line.GRNNo);
             await repository.insertBinCompleteRow(transaction, {
                 whsCode: trimmedWhsCode,
                 boxNumber: trimmedBoxNumber,
-                grnNo: (grnLine && grnLine.GRNNo) || '',
-                grnType: line.Type || (grnLine && grnLine.Type),
-                docNo: (grnLine && grnLine.DocNo) || '',
+                grnNo: line.GRNNo,
+                grnType: line.Type || (grnMeta && grnMeta.Type),
+                docNo: (grnMeta && grnMeta.DocNo) || '',
                 itemCode: line.ItemCode,
                 itemName: itemNames[line.ItemCode] || line.ItemCode,
                 itemGroup: line.ItemGroup,
@@ -339,9 +339,7 @@ async function completeBoxAsync({ boxNumber, whsCode }, user) {
                 createdBy: completedBy,
                 scannedItemJson: JSON.stringify((line.UniqueNumbers || '').split(',').filter(Boolean))
             });
-            if (grnLine) {
-                await repository.syncBinningQty(transaction, grnLine.GRNNo, line.ItemCode);
-            }
+            await repository.syncBinningQty(transaction, line.GRNNo, line.ItemCode);
         }
 
         await repository.completeBox(transaction, box.PreBinBoxID, completedBy);

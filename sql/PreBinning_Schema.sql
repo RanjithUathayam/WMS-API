@@ -10,12 +10,12 @@
             -> Live warehouse stock. See repository/preBinningRepository.js: getWarehouseStock,
                getPreBinningWarehouses, and the per-scan stock lock all read these directly.
       - [dbo].[ERP_Pre_Binning]  (Sequelize model: models/ERP_API/PreBinning.js)
-            -> Reference only, and only at box completion. GRNNo is parsed off the item QR and IS
-               stored on T_PREBIN_ITEM (part of the scan's duplicate identity, see decision 1 below),
-               but it is not validated against ERP_Pre_Binning during scanning. At box completion,
-               repository.findGrnForItem separately resolves the best matching ERP_Pre_Binning row by
-               ItemCode + ItemGroup to populate T_BIN_COMPLETE's (NOT NULL) GRNNo column — ambiguous
-               if an item legitimately spans multiple open GRNs.
+            -> Reference only. GRNNo is parsed off the item QR and IS stored on T_PREBIN_ITEM (part
+               of the scan's duplicate identity, see decision 1 below), but it is not validated
+               against ERP_Pre_Binning during scanning. At box completion, T_PREBIN_ITEM.GRNNo is
+               the authoritative source copied into T_BIN_COMPLETE's (NOT NULL) GRNNo column;
+               repository.findGrnForItem only looks up that same GRNNo + ItemCode + ItemGroup in
+               ERP_Pre_Binning to fill in GRNType/DocNo metadata.
       - [dbo].[T_BIN_COMPLETE]   (Sequelize model: models/HHT/binComplete.js)
             -> Final bin-completion record, written once per box on CompleteBoxAsync. WhsCode is
                added below (nullable, for backward compatibility with pre-existing rows).
