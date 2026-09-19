@@ -102,7 +102,8 @@ function toPreBinningFilters(query) {
         binId: trimOrUndefined(query.binId),
         status: trimOrUndefined(query.status),
         fromDate: trimOrUndefined(query.fromDate),
-        toDate: trimOrUndefined(query.toDate)
+        toDate: trimOrUndefined(query.toDate),
+        search: trimOrUndefined(query.search)
     };
 }
 
@@ -180,7 +181,8 @@ function toPalletMappingFilters(query) {
         warehouseCode: trimOrUndefined(query.warehouseCode),
         status: trimOrUndefined(query.status),
         fromDate: trimOrUndefined(query.fromDate),
-        toDate: trimOrUndefined(query.toDate)
+        toDate: trimOrUndefined(query.toDate),
+        search: trimOrUndefined(query.search)
     };
 }
 
@@ -252,7 +254,8 @@ function toLocationMappingFilters(query) {
         status: trimOrUndefined(query.status),
         itemCode: trimOrUndefined(query.itemCode),
         fromDate: trimOrUndefined(query.fromDate),
-        toDate: trimOrUndefined(query.toDate)
+        toDate: trimOrUndefined(query.toDate),
+        search: trimOrUndefined(query.search)
     };
 }
 
@@ -320,7 +323,8 @@ function toInventoryDetailsFilters(query) {
         boxNumber: trimOrUndefined(query.boxNumber),
         status: trimOrUndefined(query.status),
         fromDate: trimOrUndefined(query.fromDate),
-        toDate: trimOrUndefined(query.toDate)
+        toDate: trimOrUndefined(query.toDate),
+        search: trimOrUndefined(query.search)
     };
 }
 
@@ -394,7 +398,8 @@ function toPickingHistoryFilters(query) {
         status: trimOrUndefined(query.status),
         pickedBy: trimOrUndefined(query.user || query.pickedBy),
         fromDate: trimOrUndefined(query.fromDate),
-        toDate: trimOrUndefined(query.toDate)
+        toDate: trimOrUndefined(query.toDate),
+        search: trimOrUndefined(query.search)
     };
 }
 

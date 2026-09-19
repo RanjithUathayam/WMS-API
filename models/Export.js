@@ -211,9 +211,7 @@ async function generateHTMLPDFData(res, data, reportName, columns) {
     try {
         const browser = await puppeteer.launch({
             headless: true,
-            executablePath: 'E:\Craftsman\puppeteer \chrome\win64-134.0.6998.165\chrome-win64\chrome.exe',
             args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            dumpio: true,
         });
 
         const page = await browser.newPage();

@@ -20,7 +20,7 @@ async function getWarehouses() {
             t0.WhsCode AS whsCode,
             t0.WhsName AS whsName
         FROM [BBLive].[dbo].OWHS t0
-        WHERE t0.WhsName LIKE '%THINDAL%'
+        --WHERE t0.WhsName LIKE '%THINDAL%'
         ORDER BY t0.WhsName
     `, {
         type: QueryTypes.SELECT
@@ -32,7 +32,8 @@ async function isWarehouseValid(warehouseCode) {
     const rows = await sequelize.query(`
         SELECT TOP 1 1 AS found
         FROM [BBLive].[dbo].OWHS t0
-        WHERE t0.WhsCode = :warehouseCode AND t0.WhsName LIKE '%THINDAL%'
+        WHERE t0.WhsCode = :warehouseCode 
+        --AND t0.WhsName LIKE '%THINDAL%'
     `, {
         replacements: { warehouseCode },
         type: QueryTypes.SELECT
@@ -45,7 +46,8 @@ async function getWarehouseSummary(warehouseCode) {
     const whsRows = await sequelize.query(`
         SELECT TOP 1 t0.WhsCode AS whsCode, t0.WhsName AS whsName
         FROM [BBLive].[dbo].OWHS t0
-        WHERE t0.WhsCode = :warehouseCode AND t0.WhsName LIKE '%THINDAL%'
+        WHERE t0.WhsCode = :warehouseCode 
+        --AND t0.WhsName LIKE '%THINDAL%'
     `, {
         replacements: { warehouseCode },
         type: QueryTypes.SELECT

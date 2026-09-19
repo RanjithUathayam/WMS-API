@@ -67,6 +67,10 @@ function buildPreBinningQuery(filters) {
     if (filters.status) { conditions.push('bc.BinningStatus = :status'); replacements.status = filters.status; }
     if (filters.fromDate) { conditions.push('CAST(bc.CreatedDate AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(bc.CreatedDate AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
+    if (filters.search) {
+        conditions.push('(bc.GRNNo LIKE :search OR bc.ItemCode LIKE :search OR bc.ItemName LIKE :search OR bc.BinID LIKE :search OR bc.DocNo LIKE :search OR mp.ItemName LIKE :search)');
+        replacements.search = `%${filters.search}%`;
+    }
 
     return {
         selectColumns: `
@@ -115,6 +119,10 @@ function buildPalletMappingQuery(filters) {
     if (filters.status) { conditions.push('pm.Status = :status'); replacements.status = filters.status; }
     if (filters.fromDate) { conditions.push('CAST(pmb.MappedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(pmb.MappedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
+    if (filters.search) {
+        conditions.push('(pm.PalletID LIKE :search OR pmb.BoxNumber LIKE :search OR pi.ItemCode LIKE :search OR pmb.WarehouseCode LIKE :search OR mp.ItemName LIKE :search)');
+        replacements.search = `%${filters.search}%`;
+    }
 
     return {
         selectColumns: `
@@ -178,6 +186,10 @@ function buildLocationMappingQuery(filters) {
         )`);
         replacements.itemCode = `%${filters.itemCode}%`;
     }
+    if (filters.search) {
+        conditions.push('(lm.LocationCode LIKE :search OR lm.WarehouseCode LIKE :search OR lm.RowCode LIKE :search OR lm.PalletID LIKE :search)');
+        replacements.search = `%${filters.search}%`;
+    }
 
     return {
         selectColumns: `
@@ -224,6 +236,10 @@ function buildInventoryDetailsQuery(filters) {
     if (filters.status) { conditions.push('inv.Status = :status'); replacements.status = filters.status; }
     if (filters.fromDate) { conditions.push('CAST(inv.CreatedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(inv.CreatedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
+    if (filters.search) {
+        conditions.push('(inv.ItemCode LIKE :search OR inv.LocationCode LIKE :search OR inv.PalletID LIKE :search OR inv.BoxNumber LIKE :search OR mp.ItemName LIKE :search)');
+        replacements.search = `%${filters.search}%`;
+    }
 
     return {
         selectColumns: `
@@ -270,6 +286,10 @@ function buildPickingHistoryQuery(filters) {
     if (filters.pickedBy) { conditions.push('ph.PickedBy LIKE :pickedBy'); replacements.pickedBy = `%${filters.pickedBy}%`; }
     if (filters.fromDate) { conditions.push('CAST(ph.PickedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(ph.PickedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
+    if (filters.search) {
+        conditions.push('(ph.PalletID LIKE :search OR ph.BoxNumber LIKE :search OR ph.ItemCode LIKE :search OR ph.PickedBy LIKE :search OR mp.ItemName LIKE :search)');
+        replacements.search = `%${filters.search}%`;
+    }
 
     return {
         selectColumns: `

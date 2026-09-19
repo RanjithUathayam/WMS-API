@@ -41,8 +41,9 @@ async function getPreBinningWarehouses() {
         LEFT JOIN [BBLive].[dbo].OITM t1 ON t0.ItemCode = t1.ItemCode
         LEFT JOIN [BBLive].[dbo].OWHS t2 ON t0.WhsCode = t2.WhsCode
         WHERE
-            t2.WhsName LIKE '%THINDAL%'
-            AND t0.OnHand > 0
+           -- t2.WhsName LIKE '%THINDAL%'
+            --AND
+            t0.OnHand > 0
             AND t1.ValidFor = 'Y'
             AND (t1.U_SubGrp1 IS NULL OR t1.U_SubGrp1 NOT IN (:excludedGroups))
         ORDER BY t2.WhsName
@@ -61,7 +62,7 @@ async function isWarehouseAllowed(transaction, whsCode) {
         LEFT JOIN [BBLive].[dbo].OWHS t2 ON t0.WhsCode = t2.WhsCode
         WHERE
             t0.WhsCode = :whsCode
-            AND t2.WhsName LIKE '%THINDAL%'
+            --AND t2.WhsName LIKE '%THINDAL%'
             AND t0.OnHand > 0
             AND t1.ValidFor = 'Y'
             AND (t1.U_SubGrp1 IS NULL OR t1.U_SubGrp1 NOT IN (:excludedGroups))
