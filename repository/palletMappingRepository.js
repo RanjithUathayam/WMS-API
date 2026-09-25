@@ -89,13 +89,14 @@ async function lockPrebinBoxByNumber(transaction, boxNumber) {
     return rows[0] || null;
 }
 
-async function findMappingBoxByBoxNumber(boxNumber) {
+async function findMappingBoxByBoxNumber(boxNumber, transaction) {
     const rows = await sequelize.query(`
         SELECT TOP 1 PalletMappingBoxID, PalletMappingID, PalletID, BoxNumber
         FROM T_PALLET_MAPPING_BOX WITH (NOLOCK)
         WHERE BoxNumber = :boxNumber
     `, {
         replacements: { boxNumber },
+        transaction,
         type: QueryTypes.SELECT
     });
     return rows[0] || null;

@@ -123,6 +123,10 @@ const authenticateToken = async (req, res, next) => {
     // below only keys off that first segment, and '/pick' isn't claimed by any other module, so this
     // is a dedicated (not shared/fallen-through) permission, one pattern for the whole module.
     { endpoint: '/pick',pattern:'picking_creates', moduleName: 'Picking', type:'add' },
+    // Pick List (Stock Transfer Request based picking) — same routers/mount, same single module pattern.
+    // '/picklist' covers GET/POST /picklist, GET /picklist/:id, GET /picklist/:id/inventory, POST /picklist/:id/complete.
+    { endpoint: '/picklist',pattern:'picking_creates', moduleName: 'Pick List', type:'add' },
+    { endpoint: '/stock-transfer-requests',pattern:'picking_creates', moduleName: 'Pick List Stock Transfer Requests', type:'List' },
 
     // Reports (routes/reportRoutes.js, mounted at /api/reports). Read-only, each report gets its
     // own dedicated pattern — the five segment names below don't collide with any existing

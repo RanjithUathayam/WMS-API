@@ -128,8 +128,37 @@ async function countAvailableInventoryForPallet(transaction, palletMappingId) {
     return Number(rows[0].cnt);
 }
 
+/**
+ * Pickable stock for a set of items in one warehouse — used by the Pick List inventory API.
+ * Only pallets that are eligible for picking (mapping COMPLETED, not yet fully picked) and rows with
+ * Quantity - AllocatedQty > 0 are returned. Ordered location -> pallet -> box so the HHT can walk the aisle.
+ */
+async function getPickableInventoryForItems({ warehouseCode, itemCodes }) {
+    if (!itemCodes || itemCodes.length === 0) return [];
+    return sequelize.query(`
+        SELECT inv.InventoryID, inv.WarehouseCode, inv.RowCode, inv.LocationID, inv.LocationCode,
+               inv.PalletMappingID, inv.PalletID, inv.BoxNumber, inv.ItemCode, inv.ItemGroup,
+               inv.Quantity, inv.AllocatedQty, inv.Status, inv.CreatedAt,
+               pmb.PalletMappingBoxID
+        FROM T_INVENTORY inv WITH (NOLOCK)
+        INNER JOIN T_PALLET_MAPPING pm WITH (NOLOCK) ON pm.PalletMappingID = inv.PalletMappingID
+        LEFT JOIN T_PALLET_MAPPING_BOX pmb WITH (NOLOCK) ON pmb.PalletMappingID = inv.PalletMappingID AND pmb.BoxNumber = inv.BoxNumber
+        WHERE inv.WarehouseCode = :warehouseCode
+          AND inv.ItemCode IN (:itemCodes)
+          AND inv.Status = 'AVAILABLE'
+          AND inv.Quantity - inv.AllocatedQty > 0
+          AND pm.Status = 'COMPLETED'
+          AND ISNULL(pm.PickingStatus, '') <> 'COMPLETED'
+        ORDER BY inv.ItemCode, inv.LocationCode, inv.PalletID, inv.BoxNumber
+    `, {
+        replacements: { warehouseCode, itemCodes },
+        type: QueryTypes.SELECT
+    });
+}
+
 module.exports = {
     getItemBreakdownForBoxes,
+    getPickableInventoryForItems,
     upsertInventoryRow,
     getAvailableInventoryByPallet,
     getInventoryByPalletAndBox,

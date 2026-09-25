@@ -511,6 +511,45 @@ Related read endpoint — **Picking History** — is exposed as a Report (§4.17
 
 ---
 
+### 4.16a Pick List (Stock Transfer Request picking) — mount `/api/picking`
+
+Schema: `sql/PickList_Schema.sql`. Layers: `routes/pickingRoutes.js` → `controller/pickingController.js` → `service/pickingService.js` (STR lines, create, save pick, complete), `service/pickingInventoryService.js` (stock + scans), `service/dcService.js` (`generateDCFromPickList`), `service/sapStockTransferService.js` (SAP B1 Service Layer) → `repository/pickingRepository.js`, `repository/dcRepository.js`, `repository/inventoryRepository.js`.
+
+Envelope: success `{ success: true, message, data }`; error `{ success: false, message, errorCode, code /* legacy alias */, data /* extra detail or null */ }`. All routes need the `picking_creates` right (`/pick`, `/picklist` and `/stock-transfer-requests` are registered in `authenticateToken.js`).
+
+Flow: STR (SAP OWTQ/WTQ1) → `POST /picklist` → `GET /picklist/:id/inventory` → `POST /pick/pallet` → `POST /pick/box` → `POST /pick` (repeat) → `POST /picklist/:id/complete` → DC → SAP Stock Transfer → `COMPLETED`.
+
+| Method | Path | Body / Query | Notes |
+|---|---|---|---|
+| GET | `/stock-transfer-requests` | Query: `docNum?`, `onlyAvailable=true?` | Open WTQ1 lines for `PICKLIST_FROM_WAREHOUSE` → `PICKLIST_TO_WAREHOUSE` (env vars, default `INTRTHDL` → `INTRATTM`). Each line has `openQty`, `reservedQty` (already on Pick Lists) and `availableForPickListQty`. Also returns a `documents[]` roll-up. |
+| POST | `/picklist` | `{ documents: [{ docEntry, docNum }] }` | Creates one Pick List from 1–50 STRs. Re-reads SAP under an application lock. Each document must exist, match its DocNum, be open and have open lines for the warehouse pair. Each line takes only its **unreserved** open quantity. If a document's whole remaining quantity is already on other Pick Lists → `DUPLICATE_PICKLIST`. Returns the header and `details[]` with `sourceDocEntry/sourceDocNum/sourceLineNum`. |
+| GET | `/picklist` | Query: `status?`, `limit?` (≤500) | Newest first. |
+| GET | `/picklist/:pickListId` | — | Header, details, every pick transaction, DC with its lines, and the process log (VALIDATION/DC/SAP stages). |
+| GET | `/picklist/:pickListId/inventory` | — | Per line: `itemCode, itemName, requiredQty, pickedQty, remainingQty, totalAvailableQty, inventory[] { warehouse, location, palletNumber, boxId, boxNumber, availableQty, inventoryId, ... }` plus an `itemSummary[]` with `shortageQty`. Stock comes from `T_INVENTORY`: status AVAILABLE, `Quantity − AllocatedQty > 0`, pallet mapping COMPLETED and not fully picked, same warehouse as the line. |
+| POST | `/pick/pallet` | `{ pickListId, palletNumber }` | Pallet must exist, be pickable, have stock, and hold at least one item still required by the Pick List (`PALLET_NOT_APPLICABLE`). Returns only the applicable lines, with `locations[]`, `boxNumbers[]`, and per line `pickListLines[]` + `suggestedPickQty`. **Without `pickListId`** the original pallet-only scan (§4.16) runs, so the existing screen keeps working. |
+| POST | `/pick/box` | `{ pickListId, palletNumber, boxNumber }` | Box exists / is on that pallet / holds a required item (`BOX_NOT_APPLICABLE`) / has stock (`INSUFFICIENT_STOCK`). Without `pickListId` → legacy behaviour. |
+| POST | `/pick` | `{ pickListId, pickListDetailId, itemCode, palletNumber, boxNumber, location, pickQty, clientRequestId? }` | **Save Pick Transaction.** Runs in one transaction with a fixed lock order: Pick List header → detail → pallet mapping → inventory row. It re-validates everything on the server, then updates the detail's Picked/Remaining qty (guarded UPDATE), deducts `T_INVENTORY`, writes `T_PICKING_HISTORY` and `T_PICK_TRANSACTION` (with source DocEntry/DocNum/LineNum, warehouse, location, pallet, box and the server-side available qty), and rolls the Pick List and pallet statuses forward. Any failure rolls everything back. An optional `clientRequestId` makes HHT retries safe: repeating the same id returns the original pick with `duplicate: true`. |
+| POST | `/picklist/:pickListId/complete` | — | See below. |
+
+**Complete** is idempotent and can resume after a failure. SAP can't be called inside a SQL transaction, so completion is stored as a series of states. Each database step is its own transaction:
+1. Lock the header and details. Check that every line is fully picked and that the pick transactions add up to the picked quantity (`PICK_AUDIT_MISMATCH`). Then set `PICKED`, stamp `CompletedBy/CompletedDate` (first time only) and take a 5-minute processing lease. A second concurrent call gets `PICKLIST_PROCESSING`.
+2. `generateDCFromPickList` → `T_DC` + `T_DC_DETAIL` → `DC_CREATED`. A unique index on `T_DC.PickListID` allows only one DC per Pick List.
+3. SAP Stock Transfer → `COMPLETED`, storing `StockTransferDocEntry/DocNum`.
+
+If step 2 or 3 fails, the error is saved (`lastError`), logged to `T_PICK_LIST_PROCESS_LOG`, and the lease is released. The response is `DC_GENERATION_FAILED` (500) or `SAP_STOCK_TRANSFER_FAILED` (502). **Calling Complete again retries from the failed step.** Calling it on a `COMPLETED` Pick List returns the stored references with `alreadyCompleted: true` and creates nothing.
+
+Response `data`: `{ pickListId, pickListNumber, status: "COMPLETED", dcNumber: "DC000123", stockTransferDocEntry, stockTransferNumber, alreadyCompleted }`.
+
+**SAP Stock Transfer** (`service/sapStockTransferService.js`) uses server-only env vars: `SAP_B1_URL` (e.g. `https://api.uathayam.in:50000/b1s/v1`), `SAP_B1_COMPANY_DB`, `SAP_B1_USERNAME`, `SAP_B1_PASSWORD`. Optional: `SAP_B1_TLS_REJECT_UNAUTHORIZED` (default true), `SAP_B1_TIMEOUT_MS` (60000), `SAP_B1_LINK_BASE_DOCUMENT` (default true), `SAP_B1_BASE_TYPE` (default `InventoryTransferRequest`).
+- The session is logged in on demand, cached in memory, renewed before it expires, and re-logged in once on a 401. It is never returned to clients.
+- Everything in the payload comes from the completed Pick List. `DocDate`/`TaxDate` are the completion date, the warehouses come from the header, and `Reference2` = PickListNumber. `Comments` names the Pick List, DC and STR DocNums.
+- By default each STR line becomes its own transfer line with `BaseType/BaseEntry/BaseLine`. This keeps traceability and closes the request lines in SAP. With `SAP_B1_LINK_BASE_DOCUMENT=false`, lines for the same item and warehouses are combined instead.
+- Before every POST the service searches SAP for `Reference2 eq '<PickListNumber>'`. If a transfer is found it is adopted, never posted twice. This covers a lost response or a failed DB update.
+
+Reservation rule: a Pick List line reserves its `RequestedQty` against its source STR line. It stops reserving when the Pick List is `CANCELLED`, or when its SAP transfer was posted with base links (because SAP has then reduced `WTQ1.OpenQty` itself).
+
+Error codes: `MISSING_FIELDS`, `INVALID_DOCUMENT`, `TOO_MANY_DOCUMENTS`, `INVALID_PICK_QTY` (400); `DOCUMENT_NOT_FOUND`, `PICKLIST_NOT_FOUND`, `PALLET_NOT_FOUND`, `BOX_NOT_FOUND`, `ITEM_NOT_FOUND` (404); `DOCUMENT_CLOSED`, `NO_OPEN_LINES`, `DUPLICATE_PICKLIST`, `PICKLIST_BUSY`, `PICKLIST_CLOSED`, `PICKLIST_CANCELLED`, `PICKLIST_PROCESSING`, `PALLET_NOT_AVAILABLE`, `PALLET_NOT_APPLICABLE`, `BOX_NOT_IN_PALLET`, `BOX_NOT_APPLICABLE`, `ITEM_NOT_IN_PICKLIST`, `LINE_ALREADY_PICKED`, `PICK_QTY_EXCEEDS_REMAINING`, `WAREHOUSE_MISMATCH`, `LOCATION_MISMATCH`, `INSUFFICIENT_STOCK`, `PICKING_INCOMPLETE` (`data.pendingLines`), `PICK_AUDIT_MISMATCH`, `DC_NOT_ALLOWED` (409); `DC_GENERATION_FAILED` (500); `SAP_STOCK_TRANSFER_FAILED` (502).
+
 ### 4.17 Reports — Picking History (addition to §4.5... see `/api/reports` mount above)
 
 #### `GET /api/reports/picking`
