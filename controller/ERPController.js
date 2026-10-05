@@ -2,6 +2,45 @@ const PreBinning = require('../models/ERP_API/PreBinning')
 const { sequelize, sequelize2 } = require('../config/database');
 const MasterPart = require('../models/master/MasterPart')
 const { TableHints } = require('sequelize');
+const axios = require('axios');
+
+const GRN_UNITS = ['ATTM', 'Thindal'];
+const ATTM_PREBINNING_URL = process.env.ATTM_PREBINNING_URL || 'http://10.0.210.6:8080/WMS_API/api/ERP/createERPPreBinning';
+
+// ATTM unit: pre-binning is created on the ATTM server through its createERPPreBinning API
+const pushATTMPreBinning = async (dataList) => {
+    const token = process.env.ATTM_API_TOKEN;
+    if (!token) {
+        return { status: 0, message: 'ATTM_API_TOKEN is not configured on the server', data: [] };
+    }
+
+    try
+    {
+        const response = await axios.post(ATTM_PREBINNING_URL, {
+            ProcessType: 'addPreBinning',
+            data: dataList.map((item) => ({ ...item, Quantity: String(item.Quantity) }))
+        }, {
+            headers: { 'authenticatetoken': token, 'Content-Type': 'application/json' },
+            timeout: 40000,
+            validateStatus: () => true
+        });
+
+        const body = response.data || {};
+        if (response.status === 200 && body.status === 1) {
+            return { status: 1, Reason: body.Reason || body.message || 'ATTM PreBinning created successfully', data: [] };
+        }
+
+        return {
+            status: 0,
+            message: body.message || body.Reason || `ATTM PreBinning API failed (HTTP ${response.status})`,
+            data: body.data || []
+        };
+    }
+    catch (error)
+    {
+        return { status: 0, message: `ATTM PreBinning API error: ${error.message}`, data: [] };
+    }
+};
 
 const processERPPreBinningData = async (dataList, userName) => {
     const seen = new Map();
@@ -128,10 +167,16 @@ const createGRNPushingTransaction = async (req, res) => {
         const type = req.body?.type || 'Binning';
         const process = req.body?.process || 'GRPO';
         const status = req.body?.status || 'Pending';
+        const unit = req.body?.unit;
 
         if (docEntry === undefined || docEntry === null || docEntry === '') {
             await dbTransaction.rollback();
             return res.status(202).json({ status: 0, message: 'docEntry is required' });
+        }
+
+        if (!GRN_UNITS.includes(unit)) {
+            await dbTransaction.rollback();
+            return res.status(202).json({ status: 0, message: 'unit is required (ATTM or Thindal)' });
         }
 
         const headerRows = await sequelize2.query(
@@ -260,7 +305,9 @@ const createGRNPushingTransaction = async (req, res) => {
             Type: selectedHeader.Type || ''
         }));
 
-        const preBinningResult = await processERPPreBinningData(preBinningPayload, req.user.UserName);
+        const preBinningResult = unit === 'ATTM'
+            ? await pushATTMPreBinning(preBinningPayload)
+            : await processERPPreBinningData(preBinningPayload, req.user.UserName);
 
         await sequelize2.query(`
             UPDATE Tran_TransHeader
