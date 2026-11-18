@@ -23,16 +23,41 @@ const getPendingGRN = async(req,res) =>{
             tableHint: TableHints.NOLOCK
         });
 
+        // GRNNo + DocNo pairs so the HHT can display DocNo while still using GRNNo as the key
+        const grnDocRows = await PreBinning.findAll({
+            attributes: ['GRNNo', 'DocNo'],
+            where: {
+                GRNStatus: 'Pending'
+            },
+            group: ['GRNNo', 'DocNo'],
+            raw: true,
+            tableHint: TableHints.NOLOCK
+        });
+        const grnDocMap = new Map();
+        grnDocRows.forEach(row => {
+            const docs = grnDocMap.get(row.GRNNo) || [];
+            if (row.DocNo && !docs.includes(row.DocNo)) docs.push(row.DocNo);
+            grnDocMap.set(row.GRNNo, docs);
+        });
+
         const remarks = await MasterReason.findAll({
             attributes: ['ReasonID','ReasonDescription'],
             tableHint: TableHints.NOLOCK
         })
-        
+
         // Extract the GRN_NO values from the result
-        const grnNos = distinctGRNNos.map(item => item.GRNNo); 
-        if (grnNos) 
-        {                        
-            res.status(200).json({status: 1, message: 'Pending GRN Data Get successfully... ', data: grnNos, remarks: remarks })
+        const grnNos = distinctGRNNos.map(item => item.GRNNo);
+        // DocNo falls back to GRNNo when a GRN has no DocNo.
+        // Year is the financial-year suffix of DocNo (e.g. "4424/FY2627" -> "FY2627").
+        const grnDocs = grnNos.map(GRNNo => {
+            const docs = grnDocMap.get(GRNNo) || [];
+            const docNo = docs.join(', ') || GRNNo;
+            const year = docs.length && docs[0].includes('/') ? docs[0].split('/').pop().trim() : '';
+            return { GRNNo, DocNo: docNo, Year: year };
+        });
+        if (grnNos)
+        {
+            res.status(200).json({status: 1, message: 'Pending GRN Data Get successfully... ', data: grnNos, grnDocs: grnDocs, remarks: remarks })
         } 
         else 
         {
