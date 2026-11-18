@@ -17,6 +17,7 @@ const locationRoutes = require('./routes/locationRoutes')
 const locationMappingRoutes = require('./routes/locationMappingRoutes')
 const palletMappingRoutes = require('./routes/palletMappingRoutes')
 const pickingRoutes = require('./routes/pickingRoutes')
+const rackRoutes = require('./routes/rackRoutes')
 const reportRoutes = require('./routes/reportRoutes')
 const transactionRoutes = require('./routes/transactionRoutes');
 const dataRoutes = require('./routes/dataRoutes');
@@ -64,6 +65,7 @@ app.use('/api/location', authenticateToken, locationRoutes)
 app.use('/api/location-mapping', authenticateToken, locationMappingRoutes)
 app.use('/api/pallet-mapping', authenticateToken, palletMappingRoutes)
 app.use('/api/picking', authenticateToken, pickingRoutes)
+app.use('/api/rack', authenticateToken, rackRoutes)
 app.use('/api/reports', authenticateToken, reportRoutes)
 const PORT = process.env.PORT || 3300//8083;
 

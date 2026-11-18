@@ -581,6 +581,46 @@ Plus `pagination` and `totals.pickedQty` (sum across the whole filtered set, not
 
 ---
 
+### 4.18 Rack Management (Rack Store / Rack Picking) — mount `/api/rack` (`routes/rackRoutes.js` → `controller/rackController.js` → `service/rackService.js`)
+
+Uses **Style B** envelopes. Stores loose items into a rack and picks them back out. Run `sql/RackManagement_Schema.sql` and `sql/RightsMenuList_RackManagement_Data.sql` first.
+
+- **Warehouse** must be selected first (`whsCode`, required on scan/save). Only warehouses that have at least one non-`INACTIVE` location are offered; a rack from any other warehouse is rejected with `WAREHOUSE_MISMATCH`.
+- **Rack** = a Location Master row (`T_LOCATION`). The Rack QR is the location's `LocationCode` label (the same label Location Mapping scans). `INACTIVE`/`BLOCKED` locations are rejected; `T_LOCATION.Status` is never changed by this module.
+- **Item QR** = the Pre-Binning label `ITEMCODE|TYPE|GRN NO|ITEMGROUP|UNIQUE NUMBER|QTY` (a *tagged* piece, qty fixed by the label), or a bare `ItemCode` (untagged, qty entered by the operator). Items must exist in SAP `OITM` or `Master_Part`.
+- **Stock** lives in `T_RACK_INVENTORY` (one row per rack + item), not `T_INVENTORY` — pallet picking and Pick Lists are unaffected. Every save writes `T_RACK_TRANSACTION` (header) + `T_RACK_TRANSACTION_DETAIL` (lines with qty before/after) in the same DB transaction as the stock change.
+
+| Method | Path | Body / Query | Notes |
+|---|---|---|---|
+| GET | `/api/rack/rackwarehouses` | — | **Warehouse list** for the selector: `[{ warehouseCode, warehouseName, rackCount }]`. |
+| POST | `/api/rack/rackscan` | `{ mode, whsCode, rackCode }` | **Scan Rack.** `mode` = `STORE` \| `PICK`. Returns `{ mode, rack, stock[], totalQty }`. `PICK` on an empty rack → `RACK_EMPTY`. |
+| POST | `/api/rack/rackitem` | `{ mode, whsCode, rackCode, itemQr, scannedQty? }` | **Scan Item.** Read-only validation. `scannedQty` = qty of the same item already in the unsaved list (for the PICK stock check). Returns `{ mode, rackCode, item: { itemCode, itemName, itemGroup, itemType, grnNo, uniqueNumber, tagged, itemQr, qty, availableQty } }`; `availableQty` is the rack's current qty of that item. |
+| POST | `/api/rack/racksave` | `{ mode, whsCode, rackCode, clientRequestId, deviceId?, items: [ { itemQr } \| { itemCode, qty } ] }` | **Save.** The only mutating call. STORE adds, PICK deducts. Tagged lines send `itemQr` (the server re-parses the qty); untagged lines send `itemCode` + `qty`. Max 500 lines. Returns the transaction (see below); `201`. |
+| GET | `/api/rack/rackhistory` | `?mode&whsCode&rackCode&itemCode&createdBy&fromDate&toDate&page&pageSize` | Transaction history, newest first. Dates `YYYY-MM-DD` (inclusive). `pageSize` default 50, max 200. Returns `{ page, pageSize, total, rows[] }`. |
+| GET | `/api/rack/rackhistory/:transactionId` | — | One transaction with its lines. |
+
+Save / history-detail response `data`:
+```jsonc
+{
+  "transactionId": 900, "transactionNo": "RS00000900", // RS = store, RP = pick
+  "mode": "STORE", "locationId": 5, "rackCode": "WH1-A-005", "warehouseCode": "WH1", "rowCode": "A",
+  "totalLines": 2, "totalQty": 5, "deviceId": "HHT-1", "createdBy": "operator1", "createdAt": "...",
+  "items": [
+    { "lineNum": 1, "itemCode": "ITM-1", "itemName": "Widget", "itemGroup": "GRP", "itemType": "T1",
+      "grnNo": "GRN1", "uniqueNumber": "0001", "qty": 2, "qtyBefore": 0, "qtyAfter": 2 }
+  ],
+  "duplicate": false // true when this clientRequestId was already saved — nothing was applied again
+}
+```
+
+Error codes → HTTP status: `MISSING_FIELDS`, `WAREHOUSE_REQUIRED`, `INVALID_REQUEST`, `INVALID_MODE`, `INVALID_ITEM_QR`, `INVALID_QTY` (qty ≤ 0 or > 3 decimals), `TOO_MANY_LINES` (400); `RACK_NOT_FOUND`, `ITEM_NOT_FOUND`, `TRANSACTION_NOT_FOUND` (404); `WAREHOUSE_MISMATCH`, `RACK_INACTIVE`, `RACK_BLOCKED`, `RACK_EMPTY`, `ITEM_NOT_IN_RACK` (rack doesn't hold the item, or the label is stored in another rack), `INSUFFICIENT_STOCK` (`data: { availableQty, requestedQty }`), `DUPLICATE_SCAN` (same label twice in one save), `TAG_ALREADY_STORED` (label already in a rack — pick it first), `TAG_ALREADY_PICKED` (409).
+
+Concurrency/transaction-safety (Save only): one `sequelize.transaction`, fixed lock order — rack (`T_LOCATION`, `UPDLOCK, HOLDLOCK`) → stock rows sorted by ItemCode → label rows (`T_RACK_ITEM_TAG`) sorted by key. Every quantity is re-read under lock; PICK totals are aggregated per item across lines before checking stock, and a `CHECK (Quantity >= 0)` constraint backs it up. Any error rolls back the whole batch, so stock and transaction records are always written together. **Duplicate saves:** send the same `clientRequestId` on retries of the same batch — the filtered unique index on `T_RACK_TRANSACTION.ClientRequestId` guarantees it is applied once, and the repeat returns the original transaction with `duplicate: true`.
+
+> ⚠️ **Permission table note**: `/rackwarehouses`, `/rackscan`, `/rackitem`, `/rackhistory` require `rackManagement_list`; `/racksave` requires `rackManagement_creates`. Grant both to operator groups.
+
+---
+
 ## 5. Known Issues / Gotchas for Frontend Integration
 
 1. **Two response envelope conventions** (§3) — build one adapter per module family, not a single generic response parser.

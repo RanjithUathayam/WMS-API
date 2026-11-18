@@ -3,6 +3,8 @@ const { QueryTypes } = require('sequelize');
 
 const MASTER_PART_JOIN = `LEFT JOIN Master_Part mp WITH (NOLOCK) ON mp.ItemCode = %ALIAS%.ItemCode AND (mp.isDelete = 0 OR mp.isDelete IS NULL)`;
 const MASTER_PART_SELECT = `mp.ItemCode AS MasterItemCode, mp.ItemName AS MasterItemName, mp.ItemGroup AS MasterItemGroup, mp.Category AS Category, mp.Description AS Description, mp.Color AS Color, mp.Size AS Size, mp.Style AS Style, mp.BinCapacity AS BinCapacity`;
+/** Global-search fragment over every displayed Master_Part text column (expects a :search replacement). */
+const MASTER_PART_SEARCH = `mp.ItemName LIKE :search OR mp.ItemGroup LIKE :search OR mp.Category LIKE :search OR mp.Description LIKE :search OR mp.Color LIKE :search OR mp.Size LIKE :search OR mp.Style LIKE :search`;
 
 /**
  * Runs a paged data query + a matching COUNT(*) query against the same FROM/JOIN/WHERE (and GROUP BY, if any).
@@ -61,6 +63,7 @@ function buildPreBinningQuery(filters) {
     const replacements = {};
 
     if (filters.grnNo) { conditions.push('bc.GRNNo LIKE :grnNo'); replacements.grnNo = `%${filters.grnNo}%`; }
+    if (filters.whsCode) { conditions.push('bc.WhsCode = :whsCode'); replacements.whsCode = filters.whsCode; }
     if (filters.itemCode) { conditions.push('bc.ItemCode LIKE :itemCode'); replacements.itemCode = `%${filters.itemCode}%`; }
     if (filters.itemName) { conditions.push('bc.ItemName LIKE :itemName'); replacements.itemName = `%${filters.itemName}%`; }
     if (filters.binId) { conditions.push('bc.BinID LIKE :binId'); replacements.binId = `%${filters.binId}%`; }
@@ -68,7 +71,10 @@ function buildPreBinningQuery(filters) {
     if (filters.fromDate) { conditions.push('CAST(bc.CreatedDate AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(bc.CreatedDate AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
     if (filters.search) {
-        conditions.push('(bc.GRNNo LIKE :search OR bc.ItemCode LIKE :search OR bc.ItemName LIKE :search OR bc.BinID LIKE :search OR bc.DocNo LIKE :search OR mp.ItemName LIKE :search)');
+        conditions.push(`(bc.GRNNo LIKE :search OR bc.WhsCode LIKE :search OR bc.GRNType LIKE :search OR bc.DocNo LIKE :search
+            OR bc.BinID LIKE :search OR bc.ItemCode LIKE :search OR bc.ItemName LIKE :search OR bc.ItemGroup LIKE :search
+            OR bc.BinningStatus LIKE :search OR bc.ItemStatus LIKE :search OR bc.CreatedBy LIKE :search OR pb.PartyName LIKE :search
+            OR ${MASTER_PART_SEARCH})`);
         replacements.search = `%${filters.search}%`;
     }
 
@@ -120,7 +126,9 @@ function buildPalletMappingQuery(filters) {
     if (filters.fromDate) { conditions.push('CAST(pmb.MappedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(pmb.MappedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
     if (filters.search) {
-        conditions.push('(pm.PalletID LIKE :search OR pmb.BoxNumber LIKE :search OR pi.ItemCode LIKE :search OR pmb.WarehouseCode LIKE :search OR mp.ItemName LIKE :search)');
+        conditions.push(`(pm.PalletID LIKE :search OR pm.Status LIKE :search OR pmb.BoxNumber LIKE :search OR pmb.WarehouseCode LIKE :search
+            OR pmb.ItemGroup LIKE :search OR pi.ItemCode LIKE :search OR pmb.MappedBy LIKE :search
+            OR ${MASTER_PART_SEARCH})`);
         replacements.search = `%${filters.search}%`;
     }
 
@@ -187,7 +195,10 @@ function buildLocationMappingQuery(filters) {
         replacements.itemCode = `%${filters.itemCode}%`;
     }
     if (filters.search) {
-        conditions.push('(lm.LocationCode LIKE :search OR lm.WarehouseCode LIKE :search OR lm.RowCode LIKE :search OR lm.PalletID LIKE :search)');
+        conditions.push(`(lm.LocationCode LIKE :search OR lm.WarehouseCode LIKE :search OR lm.RowCode LIKE :search
+            OR CAST(lm.PositionNo AS NVARCHAR(20)) LIKE :search OR lm.PalletID LIKE :search OR CAST(lm.PalletMappingID AS NVARCHAR(20)) LIKE :search
+            OR lm.Action LIKE :search OR lm.Status LIKE :search OR lm.MappedBy LIKE :search
+            OR loc.Status LIKE :search OR loc.CurrentPalletID LIKE :search)`);
         replacements.search = `%${filters.search}%`;
     }
 
@@ -237,7 +248,9 @@ function buildInventoryDetailsQuery(filters) {
     if (filters.fromDate) { conditions.push('CAST(inv.CreatedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(inv.CreatedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
     if (filters.search) {
-        conditions.push('(inv.ItemCode LIKE :search OR inv.LocationCode LIKE :search OR inv.PalletID LIKE :search OR inv.BoxNumber LIKE :search OR mp.ItemName LIKE :search)');
+        conditions.push(`(inv.WarehouseCode LIKE :search OR inv.RowCode LIKE :search OR inv.LocationCode LIKE :search OR inv.PalletID LIKE :search
+            OR inv.BoxNumber LIKE :search OR inv.ItemCode LIKE :search OR inv.ItemGroup LIKE :search OR inv.Status LIKE :search
+            OR inv.CreatedBy LIKE :search OR ${MASTER_PART_SEARCH})`);
         replacements.search = `%${filters.search}%`;
     }
 
@@ -287,7 +300,9 @@ function buildPickingHistoryQuery(filters) {
     if (filters.fromDate) { conditions.push('CAST(ph.PickedAt AS DATE) >= :fromDate'); replacements.fromDate = filters.fromDate; }
     if (filters.toDate) { conditions.push('CAST(ph.PickedAt AS DATE) <= :toDate'); replacements.toDate = filters.toDate; }
     if (filters.search) {
-        conditions.push('(ph.PalletID LIKE :search OR ph.BoxNumber LIKE :search OR ph.ItemCode LIKE :search OR ph.PickedBy LIKE :search OR mp.ItemName LIKE :search)');
+        conditions.push(`(ph.PalletID LIKE :search OR ph.BoxNumber LIKE :search OR ph.ItemCode LIKE :search OR ph.ItemGroup LIKE :search
+            OR ph.WarehouseCode LIKE :search OR ph.LocationCode LIKE :search OR ph.Status LIKE :search OR ph.PickedBy LIKE :search
+            OR ${MASTER_PART_SEARCH})`);
         replacements.search = `%${filters.search}%`;
     }
 

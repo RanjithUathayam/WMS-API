@@ -128,6 +128,15 @@ const authenticateToken = async (req, res, next) => {
     { endpoint: '/picklist',pattern:'picking_creates', moduleName: 'Pick List', type:'add' },
     { endpoint: '/stock-transfer-requests',pattern:'picking_creates', moduleName: 'Pick List Stock Transfer Requests', type:'List' },
 
+    // Rack Management (routes/rackRoutes.js, mounted at /api/rack). Every route has its own literal
+    // first segment (none collide with an existing entry): scans + history are reads, /racksave is
+    // the only call that changes inventory.
+    { endpoint: '/rackwarehouses',pattern:'rackManagement_list', moduleName: 'Rack Management Warehouses', type:'List' },
+    { endpoint: '/rackscan',pattern:'rackManagement_list', moduleName: 'Rack Management Scan Rack', type:'List' },
+    { endpoint: '/rackitem',pattern:'rackManagement_list', moduleName: 'Rack Management Scan Item', type:'List' },
+    { endpoint: '/rackhistory',pattern:'rackManagement_list', moduleName: 'Rack Management History', type:'List' },
+    { endpoint: '/racksave',pattern:'rackManagement_creates', moduleName: 'Rack Management Save', type:'add' },
+
     // Reports (routes/reportRoutes.js, mounted at /api/reports). Read-only, each report gets its
     // own dedicated pattern — the five segment names below don't collide with any existing
     // moduleNames entry (checked: /pallet, /complete, /box, /details, /inventory, /list, /summary,

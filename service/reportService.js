@@ -77,7 +77,7 @@ function buildItemMaster(row) {
 // Pre-Binning Report
 // ---------------------------------------------------------------------------
 const PREBINNING_SORT_COLUMNS = {
-    grnNo: 'GRNNo', itemCode: 'ItemCode', itemName: 'ItemName', itemGroup: 'ItemGroup', binId: 'BinID',
+    grnNo: 'GRNNo', whsCode: 'WhsCode', itemCode: 'ItemCode', itemName: 'ItemName', itemGroup: 'ItemGroup', binId: 'BinID',
     binnedQty: 'BinnedQty', requestedQty: 'RequestedQty', binningStatus: 'BinningStatus', itemStatus: 'ItemStatus',
     createdDate: 'CreatedDate'
 };
@@ -97,6 +97,7 @@ const PREBINNING_EXPORT_COLUMNS = [
 function toPreBinningFilters(query) {
     return {
         grnNo: trimOrUndefined(query.grnNo),
+        whsCode: trimOrUndefined(query.whsCode),
         itemCode: trimOrUndefined(query.itemCode),
         itemName: trimOrUndefined(query.itemName),
         binId: trimOrUndefined(query.binId),
@@ -158,7 +159,7 @@ async function getPreBinningReportExportAsync(query) {
 // ---------------------------------------------------------------------------
 const PALLETMAPPING_SORT_COLUMNS = {
     palletId: 'PalletID', boxNumber: 'BoxNumber', itemCode: 'ItemCode', warehouseCode: 'WarehouseCode',
-    boxTotalQty: 'BoxTotalQty', itemQty: 'ItemQty', status: 'PalletStatus', mappedAt: 'MappedAt'
+    boxTotalQty: 'BoxTotalQty', itemQty: 'ItemQty', status: 'PalletStatus', palletStatus: 'PalletStatus', mappedAt: 'MappedAt'
 };
 const PALLETMAPPING_DEFAULT_ORDER = 'MappedAt DESC';
 const PALLETMAPPING_EXPORT_COLUMNS = [
@@ -233,7 +234,7 @@ async function getPalletMappingReportExportAsync(query) {
 // ---------------------------------------------------------------------------
 const LOCATIONMAPPING_SORT_COLUMNS = {
     locationCode: 'LocationCode', warehouseCode: 'WarehouseCode', rowCode: 'RowCode', positionNo: 'PositionNo',
-    palletId: 'PalletID', status: 'MappingStatus', mappedAt: 'MappedAt'
+    palletId: 'PalletID', status: 'MappingStatus', mappingStatus: 'MappingStatus', mappedAt: 'MappedAt'
 };
 const LOCATIONMAPPING_DEFAULT_ORDER = 'MappedAt DESC';
 const LOCATIONMAPPING_EXPORT_COLUMNS = [
