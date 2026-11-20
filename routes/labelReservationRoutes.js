@@ -8,6 +8,7 @@ const labelReservationController = require('../controller/labelReservationContro
 router.post('/reserveLabelNumbers', labelReservationController.reserveLabelNumbers);
 router.post('/print', labelReservationController.printLabels);
 router.post('/print/confirm', labelReservationController.confirmPrint);
+router.post('/print/manual', labelReservationController.printManualLabels);
 router.get('/printers', labelReservationController.listPrinters);
 router.post('/printers/detect', labelReservationController.detectPrinters);
 

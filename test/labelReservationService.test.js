@@ -286,3 +286,37 @@ describe('listPrintersAsync (Test 2, 3)', () => {
         expect(printerDetection.detectPrinters).toHaveBeenCalledWith({ forceRefresh: true });
     });
 });
+
+describe('printManualLabelsAsync — manual label values', () => {
+    test('builds a command for typed values without touching reservations', async () => {
+        const result = await service.printManualLabelsAsync({
+            values: ['MANUAL-001', '  ABC123  ', ''], copies: 2, printerName: 'TSC TE210'
+        });
+
+        expect(result.success).toBe(true);
+        expect(result.data.labelCount).toBe(2);
+        expect(result.data.totalPhysicalPrints).toBe(4);
+        expect(result.data.command).toContain('"MANUAL-001"');
+        expect(result.data.command).toContain('"ABC123"');
+        expect(result.data.command).toContain('PRINT 2');
+        expect(repository.lockReservationsByLabelNumbers).not.toHaveBeenCalled();
+        expect(repository.updateReservationsStatus).not.toHaveBeenCalled();
+    });
+
+    test('rejects an empty list', async () => {
+        await expect(service.printManualLabelsAsync({ values: ['  '], copies: 1 }))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    });
+
+    test('rejects values that would break the printer command', async () => {
+        for (const bad of ['A"B', 'A^B', 'A~B', 'A\\B']) {
+            await expect(service.printManualLabelsAsync({ values: [bad], copies: 1, printerName: 'TSC TE210' }))
+                .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+        }
+    });
+
+    test('rejects invalid copies', async () => {
+        await expect(service.printManualLabelsAsync({ values: ['A1'], copies: 0, printerName: 'TSC TE210' }))
+            .rejects.toMatchObject({ code: 'VALIDATION_ERROR' });
+    });
+});

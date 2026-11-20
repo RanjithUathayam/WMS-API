@@ -381,6 +381,75 @@ async function printLabelsAsync(body) {
     };
 }
 
+// Characters that would break out of a TSPL "..." string or a ZPL ^FD field — rejected rather than
+// escaped, since a mangled command can print garbage or reconfigure the printer.
+const MANUAL_VALUE_FORBIDDEN = /["^~\\\r\n\t\x00-\x1F\x7F]/;
+const MAX_MANUAL_VALUE_LENGTH = 64;
+const MAX_MANUAL_VALUES_PER_REQUEST = 100;
+
+/**
+ * POST /api/label/print/manual — builds a print command for label values the user typed by hand.
+ * Unlike printLabelsAsync, these values are NOT reserved Label Numbers: nothing is checked against or
+ * written to T_LABEL_RESERVATION, so they can be printed any number of times. Uses the same printer
+ * settings validation, printable-area geometry and TSPL/ZPL builders as the reserved flow, and like
+ * it returns the command for the browser to send via QZ Tray.
+ */
+async function printManualLabelsAsync(body) {
+    const rawValues = Array.isArray(body.values) ? body.values : [];
+    const values = rawValues.map(v => (v === undefined || v === null ? '' : String(v).trim())).filter(v => v !== '');
+    if (values.length === 0) {
+        throw new LabelReservationError('VALIDATION_ERROR', 'Enter at least one label value.');
+    }
+    if (values.length > MAX_MANUAL_VALUES_PER_REQUEST) {
+        throw new LabelReservationError('VALIDATION_ERROR', `A maximum of ${MAX_MANUAL_VALUES_PER_REQUEST} label values can be printed at once.`);
+    }
+    for (const value of values) {
+        if (value.length > MAX_MANUAL_VALUE_LENGTH) {
+            throw new LabelReservationError('VALIDATION_ERROR', `Label value "${value.slice(0, 20)}..." is longer than ${MAX_MANUAL_VALUE_LENGTH} characters.`);
+        }
+        if (MANUAL_VALUE_FORBIDDEN.test(value)) {
+            throw new LabelReservationError('VALIDATION_ERROR', `Label value "${value}" contains a character that cannot be printed (", ^, ~, \\ or control characters).`);
+        }
+    }
+
+    const copies = Number(body.copies === undefined ? 1 : body.copies);
+    if (!Number.isInteger(copies) || copies <= 0) {
+        throw new LabelReservationError('VALIDATION_ERROR', 'copies must be a positive integer.');
+    }
+
+    const printerName = await resolvePrinterName(body.printerName);
+    const settings = await resolvePrintSettings(body, printerName);
+    const printableArea = await resolvePrintableArea(settings.labelWidthMm);
+
+    let command;
+    try {
+        command = printerCommand.buildPrintCommand({
+            ...settings,
+            ...printableArea,
+            printerName,
+            labels: values.map(value => ({ labelNumber: value, qrValue: value, copies }))
+        });
+    } catch (error) {
+        if (error instanceof printerCommand.PrintableAreaError) {
+            throw new LabelReservationError('PRINTABLE_AREA_EXCEEDED', `${error.message} Try a shorter label value.`);
+        }
+        throw new LabelReservationError('PRINT_COMMAND_GENERATION_FAILED', error.message || 'Unable to generate the printer command for these label values.');
+    }
+
+    return {
+        success: true,
+        message: 'Print command generated — send it to the printer',
+        data: {
+            printerName,
+            ...settings,
+            ...printableArea,
+            labelCount: values.length,
+            totalPhysicalPrints: values.length * copies,
+            command
+        }
+    };
+}
+
 /**
  * POST /api/label/print/confirm — the browser calls this right after it actually sends printLabelsAsync's
  * `command` to the printer via QZ Tray, reporting whether it truly reached the printer. This is the only
@@ -453,6 +522,7 @@ module.exports = {
     LabelReservationError,
     reserveLabelNumbersAsync,
     printLabelsAsync,
+    printManualLabelsAsync,
     confirmPrintAsync,
     listPrintersAsync,
     detectPrintersAsync
