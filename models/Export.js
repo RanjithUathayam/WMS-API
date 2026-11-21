@@ -9,6 +9,12 @@ function formatDate(date) {
     return `${day}-${month}-${year}_${hours}:${minutes}:${seconds}`;
 }
 
+// Rows may be Sequelize instances (values under .dataValues) or plain objects from raw queries.
+function cellValueOf(row, key) {
+    const source = (row && row.dataValues) ? row.dataValues : (row || {});
+    return source[key] !== undefined ? source[key] : 'N/A';
+}
+
 const formattedDate = formatDate(new Date());
 async function exportData(res, format, filename, columns, data) { 
     try { 
@@ -55,15 +61,7 @@ function generateCSVData(res, data, reportName, columns) {
     const formattedData = data.map(row => {
         const formattedRow = {};
         JSON.parse(columns).forEach(column => {
-            if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report') || (reportName == 'Pre-Binning Report') || (reportName == 'Pallet Mapping Report') || (reportName == 'Location Mapping Report') || (reportName == 'Inventory Details Report'))
-            {
-                formattedRow[column.data] = row[column.data] !== undefined ? row[column.data] : 'N/A';
-            }
-            else
-            {
-                formattedRow[column.data] = row.dataValues[column.data] !== undefined ? row.dataValues[column.data] : 'N/A';
-            }
-            
+            formattedRow[column.data] = cellValueOf(row, column.data);
         });
         return formattedRow;
     });
@@ -112,14 +110,7 @@ async function generateExcelData(res, data, reportName, columns) {
         const jsonRows = data.map(obj => {
             const row = [];
             parsedColumns.forEach(header => {
-                if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report') || (reportName == 'Pre-Binning Report') || (reportName == 'Pallet Mapping Report') || (reportName == 'Location Mapping Report') || (reportName == 'Inventory Details Report'))
-                {
-                    row.push(obj[header.data] !== undefined ? obj[header.data] : 'N/A'); // Only include columns present in the header
-                }
-                else
-                {
-                    row.push(obj.dataValues[header.data] !== undefined ? obj.dataValues[header.data] : 'N/A'); // Only include columns present in the header
-                }
+                row.push(cellValueOf(obj, header.data));
             });
             return row;
         });
@@ -192,16 +183,8 @@ async function generateHTMLPDFData(res, data, reportName, columns) {
     data.forEach(row => {
         html += '<tr style="font-size:10px; height:20px;">';
         parsedColumns.forEach(column => {
-            if((reportName == 'Inventory Report') || (reportName == 'Pallet Request Report')|| (reportName == 'Alarm History Report') || (reportName == 'User Report') || (reportName == 'Pre-Binning Report') || (reportName == 'Pallet Mapping Report') || (reportName == 'Location Mapping Report') || (reportName == 'Inventory Details Report'))
-            {
-                const cellValue = row[column.data] !== undefined ? row[column.data] : 'N/A';
-                html += `<td style="width: ${columnWidth}%; text-align: left;">${cellValue}</td>`;
-            }
-            else
-            { 
-                const cellValue = row.dataValues[column.data] !== undefined ? row.dataValues[column.data] : 'N/A';
-                html += `<td style="width: ${columnWidth}%; text-align: left;">${cellValue}</td>`;
-            }
+            const cellValue = cellValueOf(row, column.data);
+            html += `<td style="width: ${columnWidth}%; text-align: left;">${cellValue}</td>`;
         });
         html += '</tr>';
     });
