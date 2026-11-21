@@ -1,7 +1,7 @@
 const { sequelize } = require('../config/database');
 const pickingRepository = require('../repository/pickingRepository');
 const dcRepository = require('../repository/dcRepository');
-const { PickingError, sumQty } = require('./pickingCommon');
+const { PickingError, sumQty, subtractQty } = require('./pickingCommon');
 
 /** Pick List statuses from which a DC may be generated (picking validated-complete). */
 const DC_ALLOWED_STATUSES = ['PICKED', 'DC_CREATED', 'COMPLETED'];
@@ -53,6 +53,7 @@ async function generateDCFromPickList(pickListId, { user } = {}) {
                 throw new PickingError('PICKING_INCOMPLETE', `Pick List ${header.PickListNumber} still has unpicked quantity.`);
             }
 
+            // DC quantity = ACTUAL picked quantity (full boxes), never the required quantity.
             const dc = await dcRepository.insertDC(transaction, {
                 pickListId,
                 dcDate: header.CompletedDateText,
@@ -93,23 +94,44 @@ async function generateDCFromPickList(pickListId, { user } = {}) {
     }
 }
 
+/** DC with item-wise lines and, per line, the boxes (pick transactions) that make up its quantity. */
 async function getDCForPickList(pickListId) {
     const dc = await dcRepository.findDCByPickListId(pickListId);
     if (!dc) return null;
-    const lines = await dcRepository.getDCDetails(dc.DCID);
-    return {
-        ...toDCDto(dc),
-        lines: lines.map(l => ({
+    const [lines, transactions] = await Promise.all([
+        dcRepository.getDCDetails(dc.DCID),
+        pickingRepository.getPickTransactions(pickListId)
+    ]);
+    const boxesByDetail = new Map();
+    for (const t of transactions) {
+        if (!boxesByDetail.has(t.PickListDetailID)) boxesByDetail.set(t.PickListDetailID, []);
+        boxesByDetail.get(t.PickListDetailID).push({
+            palletNumber: t.PalletNumber, boxNumber: t.BoxNumber, boxQty: Number(t.AvailableQty), qty: Number(t.PickQty), fullBox: !!t.IsFullBox
+        });
+    }
+    const dtoLines = lines.map(l => {
+        const requestedQty = l.RequestedQty !== undefined && l.RequestedQty !== null ? Number(l.RequestedQty) : null;
+        const quantity = Number(l.Quantity);
+        return {
             pickListDetailId: l.PickListDetailID,
             sourceDocEntry: l.SourceDocEntry,
             sourceDocNum: l.SourceDocNum,
             sourceLineNum: l.SourceLineNum,
             itemCode: l.ItemCode,
             itemName: l.ItemName,
-            quantity: Number(l.Quantity),
+            requestedQty,
+            quantity,
+            excessQty: requestedQty === null ? 0 : Math.max(subtractQty(quantity, requestedQty), 0),
             fromWarehouse: l.FromWarehouse,
-            toWarehouse: l.ToWarehouse
-        }))
+            toWarehouse: l.ToWarehouse,
+            boxes: boxesByDetail.get(l.PickListDetailID) || []
+        };
+    });
+    return {
+        ...toDCDto(dc),
+        totalRequestedQty: sumQty(dtoLines.map(l => l.requestedQty || 0)),
+        totalExcessQty: sumQty(dtoLines.map(l => l.excessQty)),
+        lines: dtoLines
     };
 }
 

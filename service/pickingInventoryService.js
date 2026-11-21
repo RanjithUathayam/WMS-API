@@ -5,6 +5,7 @@ const {
     PickingError, PICKABLE_STATUSES, isBlank, readPalletNumber, readBoxNumber, readId,
     sumQty, subtractQty, pickableQty, assertPalletPickable, toInventoryLineDto
 } = require('./pickingCommon');
+const { itemKey, excessOf, planFullBoxes, evaluateFullBox } = require('./pickingFullBox');
 
 /**
  * Read-only stock views for Pick List picking. Every quantity here is read from T_INVENTORY on the
@@ -67,7 +68,10 @@ function toApplicableLineDto(row, matchingDetails) {
         ...toInventoryLineDto(row),
         itemName: row.ItemName || (matchingDetails[0] && matchingDetails[0].ItemName) || null,
         remainingRequiredQty: remainingForItem,
-        suggestedPickQty: Math.min(pickable, remainingForItem),
+        // Full Box Picking: a box line is always picked whole.
+        fullBoxQty: pickable,
+        suggestedPickQty: pickable,
+        excessQty: Math.max(subtractQty(pickable, remainingForItem), 0),
         pickListLines: matchingDetails.map(toPickListLineRef)
     };
 }
@@ -122,8 +126,10 @@ async function getPickListInventoryAsync(pickListId) {
             fromWarehouse: d.FromWarehouse,
             toWarehouse: d.ToWarehouse,
             requiredQty: Number(d.RequestedQty),
+            plannedQty: d.PlannedQty !== undefined && d.PlannedQty !== null ? Number(d.PlannedQty) : null,
             pickedQty: Number(d.PickedQty),
             remainingQty: Number(d.RemainingQty),
+            excessQty: excessOf(d.RequestedQty, d.PickedQty),
             status: d.Status,
             totalAvailableQty: sumQty(inventory.map(i => i.availableQty)),
             inventory
@@ -138,19 +144,31 @@ async function getPickListInventoryAsync(pickListId) {
             const inventory = stockByKey.get(key) || [];
             summaryMap.set(key, {
                 itemCode: d.ItemCode, itemName: d.ItemName, warehouse: d.FromWarehouse,
-                requiredQty: 0, pickedQty: 0, remainingQty: 0,
-                availableQty: sumQty(inventory.map(i => i.availableQty))
+                requiredQty: 0, plannedQty: 0, pickedQty: 0, remainingQty: 0, excessQty: 0,
+                availableQty: sumQty(inventory.map(i => i.availableQty)),
+                inventory
             });
         }
         const s = summaryMap.get(key);
         s.requiredQty = sumQty([s.requiredQty, d.RequestedQty]);
+        s.plannedQty = sumQty([s.plannedQty, d.PlannedQty !== undefined && d.PlannedQty !== null ? d.PlannedQty : d.RequestedQty]);
         s.pickedQty = sumQty([s.pickedQty, d.PickedQty]);
         s.remainingQty = sumQty([s.remainingQty, d.RemainingQty]);
+        s.excessQty = sumQty([s.excessQty, excessOf(d.RequestedQty, d.PickedQty)]);
     }
-    const itemSummary = [...summaryMap.values()].map(s => ({
-        ...s,
-        shortageQty: Math.max(subtractQty(s.remainingQty, s.availableQty), 0)
-    }));
+    // Full Box Picking: whole boxes that would cover what is still required, and what picking them gives.
+    const itemSummary = [...summaryMap.values()].map(({ inventory, ...s }) => {
+        const plan = planFullBoxes(inventory.map(i => ({ ...i, qty: i.availableQty })), s.remainingQty);
+        return {
+            ...s,
+            shortageQty: Math.max(subtractQty(s.remainingQty, s.availableQty), 0),
+            suggestedPickQty: plan.plannedQty,
+            suggestedExcessQty: plan.excessQty,
+            suggestedBoxes: plan.boxes.map(b => ({
+                inventoryId: b.inventoryId, location: b.location, palletNumber: b.palletNumber, boxNumber: b.boxNumber, boxQty: b.availableQty
+            }))
+        };
+    });
 
     return {
         pickListId: header.PickListID,
@@ -182,6 +200,8 @@ async function scanPalletForPickListAsync(rawRequest) {
     }
 
     const openDetails = indexOpenDetails(details);
+    const listedKeys = new Set(details.map(d => itemKey(d.FromWarehouse, d.ItemCode)));
+    const blockedBoxes = new Set(withStock.filter(r => !listedKeys.has(itemKey(r.WarehouseCode, r.ItemCode))).map(r => r.BoxNumber));
     const applicable = withStock
         .map(row => ({ row, matches: openDetails.get(detailKeyForInventory(row)) || [] }))
         .filter(x => x.matches.length > 0);
@@ -200,7 +220,9 @@ async function scanPalletForPickListAsync(rawRequest) {
         pickingStatus: mapping.PickingStatus || 'PENDING',
         locations: [...new Set(applicable.map(x => x.row.LocationCode).filter(Boolean))],
         boxNumbers: [...new Set(applicable.map(x => x.row.BoxNumber))],
-        items: applicable.map(x => toApplicableLineDto(x.row, x.matches))
+        // Boxes that also hold items not on this Pick List cannot be picked whole (BOX_HAS_UNLISTED_ITEMS).
+        blockedBoxNumbers: [...new Set(applicable.map(x => x.row.BoxNumber).filter(b => blockedBoxes.has(b)))],
+        items: applicable.map(x => ({ ...toApplicableLineDto(x.row, x.matches), fullBoxPickable: !blockedBoxes.has(x.row.BoxNumber) }))
     };
 }
 
@@ -226,19 +248,12 @@ async function scanBoxForPickListAsync(rawRequest) {
         throw new PickingError('BOX_NOT_FOUND', `Box ${boxNumber} was not found.`);
     }
 
-    const openDetails = indexOpenDetails(details);
-    const requiredLines = boxLines
-        .map(row => ({ row, matches: openDetails.get(detailKeyForInventory(row)) || [] }))
-        .filter(x => x.matches.length > 0);
-    if (requiredLines.length === 0) {
-        throw new PickingError('BOX_NOT_APPLICABLE',
-            `Box ${boxNumber} does not contain any item still required by Pick List ${header.PickListNumber}.`);
-    }
-
-    const available = requiredLines.filter(x => x.row.Status === 'AVAILABLE' && pickableQty(x.row) > 0);
-    if (available.length === 0) {
-        throw new PickingError('INSUFFICIENT_STOCK', `Box ${boxNumber} has no available quantity left for the required item(s).`);
-    }
+    // Full Box Picking — the same rules POST /pick applies under lock (whole box, every item line,
+    // same warehouse, nothing unlisted, not already picked), evaluated here as a preview.
+    const evaluation = evaluateFullBox({
+        boxRows: boxLines, details, boxNumber, palletNumber,
+        pickListNumber: header.PickListNumber, fromWarehouse: header.FromWarehouse
+    });
 
     const box = await palletMappingRepository.findMappingBoxByBoxNumber(boxNumber);
 
@@ -249,7 +264,25 @@ async function scanBoxForPickListAsync(rawRequest) {
         palletNumber: mapping.PalletID,
         boxId: box && box.PalletMappingID === mapping.PalletMappingID ? box.PalletMappingBoxID : null,
         boxNumber,
-        items: available.map(x => toApplicableLineDto(x.row, x.matches))
+        fullBox: true,
+        warehouse: evaluation.lines[0].row.WarehouseCode,
+        location: evaluation.lines[0].row.LocationCode,
+        totalBoxQty: evaluation.totalBoxQty,
+        totalRequiredQty: evaluation.totalRequiredQty,
+        totalExcessQty: evaluation.totalExcessQty,
+        items: evaluation.lines.map(l => ({
+            ...toApplicableLineDto(l.row, l.itemLines),
+            fullBoxQty: l.boxQty,
+            suggestedPickQty: l.boxQty,
+            excessQty: l.excessQty,
+            allocations: l.allocations.map(a => ({
+                pickListDetailId: a.line.PickListDetailID,
+                sourceDocNum: a.line.SourceDocNum,
+                sourceLineNum: a.line.SourceLineNum,
+                qty: a.qty,
+                excessQty: a.excessQty
+            }))
+        }))
     };
 }
 

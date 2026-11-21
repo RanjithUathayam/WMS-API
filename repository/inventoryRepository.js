@@ -99,6 +99,25 @@ async function lockInventoryRow(transaction, { palletMappingId, boxNumber, itemC
     return rows[0] || null;
 }
 
+/**
+ * Full Box Picking: locks EVERY item row of one (pallet, box) — the whole box is picked in one go.
+ * Same lock position as lockInventoryRow (after the pallet mapping row); ordered by InventoryID so two
+ * transactions always lock the rows of a box in the same order.
+ */
+async function lockInventoryRowsForBox(transaction, { palletMappingId, boxNumber }) {
+    return sequelize.query(`
+        SELECT InventoryID, WarehouseCode, RowCode, LocationID, LocationCode, PalletMappingID, PalletID,
+               BoxNumber, ItemCode, ItemGroup, Quantity, AllocatedQty, Status
+        FROM T_INVENTORY WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
+        WHERE PalletMappingID = :palletMappingId AND BoxNumber = :boxNumber
+        ORDER BY InventoryID
+    `, {
+        replacements: { palletMappingId, boxNumber },
+        transaction,
+        type: QueryTypes.SELECT
+    });
+}
+
 /** Deducts pickedQty from an already-locked inventory row. Flips Status to CLEARED once Quantity hits 0. Never allows Quantity to go negative (caller must validate pickedQty <= Quantity beforehand, under the same lock). */
 async function deductInventoryQty(transaction, inventoryId, { remainingQty, updatedBy }) {
     await sequelize.query(`
@@ -164,6 +183,7 @@ module.exports = {
     getInventoryByPalletAndBox,
     boxExistsInInventory,
     lockInventoryRow,
+    lockInventoryRowsForBox,
     deductInventoryQty,
     countAvailableInventoryForPallet
 };

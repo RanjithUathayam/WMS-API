@@ -5,6 +5,8 @@
     Review before running. Nothing here is executed automatically by the application.
     Safe to run multiple times (every statement is guarded).
     Run AFTER sql/Inventory_Schema.sql, sql/PalletMapping_Schema.sql and sql/Picking_Schema.sql.
+    Then run sql/PickList_FullBox_Migration.sql (Full Box Picking: PlannedQty, IsFullBox, and the
+    quantity rule that lets PickedQty exceed RequestedQty) — the API requires it.
 
     Existing objects reused (NOT recreated here):
       - [BBLive].[dbo].OWTQ / WTQ1 / OWHS (SAP Business One, read-only, cross-database)

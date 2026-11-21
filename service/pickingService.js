@@ -9,6 +9,7 @@ const {
     PickingError, PICKABLE_STATUSES, isBlank, readString, readPalletNumber, readBoxNumber, readId,
     toQty, subtractQty, sumQty, pickableQty, sameCode, assertPalletPickable, toInventoryLineDto
 } = require('./pickingCommon');
+const { itemKey, excessOf, planFullBoxes, evaluateFullBox } = require('./pickingFullBox');
 
 /** Warehouse pair eligible for Stock Transfer Request picking (the source query's filter). Overridable per deployment. */
 const PICKLIST_FROM_WAREHOUSE = (process.env.PICKLIST_FROM_WAREHOUSE || 'INTRTHDL').trim();
@@ -330,8 +331,11 @@ function toPickListDetailDto(d) {
         itemName: d.ItemName,
         sourceOpenQty: d.SourceOpenQty !== undefined ? Number(d.SourceOpenQty) : undefined,
         requestedQty: Number(d.RequestedQty),
+        // Full-box quantity planned at generation (required + the excess of whole boxes); null on old Pick Lists.
+        plannedQty: d.PlannedQty !== undefined && d.PlannedQty !== null ? Number(d.PlannedQty) : null,
         pickedQty: Number(d.PickedQty),
         remainingQty: Number(d.RemainingQty),
+        excessQty: excessOf(d.RequestedQty, d.PickedQty),
         fromWarehouse: d.FromWarehouse,
         toWarehouse: d.ToWarehouse,
         status: d.Status
@@ -359,6 +363,66 @@ function toPickListHeaderDto(h) {
         lineCount: h.LineCount !== undefined ? Number(h.LineCount) : undefined,
         sourceDocNums: h.SourceDocNums ? String(h.SourceDocNums).split(',').map(Number) : undefined
     };
+}
+
+/**
+ * Full Box Picking plan for Pick List generation. For every item (per From warehouse) the required
+ * quantity of all its lines is matched against whole boxes in pickable stock (planFullBoxes). Each
+ * candidate gets `plannedQty`: its required qty, plus — on the item's last line — the excess the whole
+ * boxes bring. The plan is advisory (stock is not reserved, picking re-validates under lock); a shortage
+ * does not block generation, it is reported. Mutates `candidates` (adds plannedQty) and returns the plan.
+ */
+async function buildFullBoxPlan(candidates) {
+    const groups = new Map();
+    for (const c of candidates) {
+        const key = itemKey(c.line.FromWarehouse, c.line.ItemCode);
+        if (!groups.has(key)) {
+            groups.set(key, { warehouse: c.line.FromWarehouse, itemCode: c.line.ItemCode, itemName: c.line.ItemName, candidates: [] });
+        }
+        groups.get(key).candidates.push(c);
+    }
+
+    const rowsByKey = new Map();
+    const itemsByWarehouse = new Map();
+    for (const g of groups.values()) {
+        if (!itemsByWarehouse.has(g.warehouse)) itemsByWarehouse.set(g.warehouse, new Set());
+        itemsByWarehouse.get(g.warehouse).add(g.itemCode);
+    }
+    for (const [warehouseCode, items] of itemsByWarehouse) {
+        const rows = await inventoryRepository.getPickableInventoryForItems({ warehouseCode, itemCodes: [...items] });
+        for (const row of rows) {
+            // Only boxes that can be picked whole: nothing of the line is allocated elsewhere.
+            if (toQty(row.AllocatedQty) > 0 || toQty(row.Quantity) <= 0) continue;
+            const key = itemKey(row.WarehouseCode, row.ItemCode);
+            if (!rowsByKey.has(key)) rowsByKey.set(key, []);
+            rowsByKey.get(key).push({
+                qty: toQty(row.Quantity), inventoryId: row.InventoryID, palletNumber: row.PalletID,
+                boxNumber: row.BoxNumber, location: row.LocationCode
+            });
+        }
+    }
+
+    const plan = [];
+    for (const [key, g] of groups) {
+        const requiredQty = sumQty(g.candidates.map(c => c.requestedQty));
+        const result = planFullBoxes(rowsByKey.get(key) || [], requiredQty);
+        g.candidates.forEach((c, i) => {
+            c.plannedQty = i === g.candidates.length - 1 ? sumQty([c.requestedQty, result.excessQty]) : c.requestedQty;
+        });
+        plan.push({
+            itemCode: g.itemCode,
+            itemName: g.itemName,
+            warehouse: g.warehouse,
+            requiredQty,
+            plannedQty: sumQty([requiredQty, result.excessQty]),
+            excessQty: result.excessQty,
+            shortageQty: result.shortageQty,
+            boxes: result.boxes.map(b => ({
+                inventoryId: b.inventoryId, palletNumber: b.palletNumber, boxNumber: b.boxNumber, location: b.location, boxQty: b.qty
+            }))
+        });
+    }
+    return plan;
 }
 
 /**
@@ -420,6 +484,9 @@ async function createPickListAsync(rawRequest, user) {
             }
         }
 
+        // Full Box Picking: plan whole boxes against the required quantity (required 10, box 25 -> planned 25).
+        const boxPlan = await buildFullBoxPlan(candidates);
+
         const header = await pickingRepository.insertPickListHeader(transaction, {
             fromWarehouse: PICKLIST_FROM_WAREHOUSE,
             toWarehouse: PICKLIST_TO_WAREHOUSE,
@@ -440,12 +507,24 @@ async function createPickListAsync(rawRequest, user) {
                 itemName: c.line.ItemName,
                 sourceOpenQty: c.openQty,
                 requestedQty: c.requestedQty,
+                plannedQty: c.plannedQty,
                 fromWarehouse: c.line.FromWarehouse,
                 toWarehouse: c.line.ToWarehouse
             }));
         }
 
-        return { ...toPickListHeaderDto(header), details: details.map(toPickListDetailDto) };
+        const warnings = boxPlan.flatMap(p => [
+            ...(p.excessQty > 0 ? [`${p.itemCode}: required ${p.requiredQty}, full boxes give ${p.plannedQty} (excess ${p.excessQty}).`] : []),
+            ...(p.shortageQty > 0 ? [`${p.itemCode}: only ${subtractQty(p.requiredQty, p.shortageQty)} of ${p.requiredQty} is in stock (short ${p.shortageQty}).`] : [])
+        ]);
+
+        return {
+            ...toPickListHeaderDto(header),
+            totalPlannedQty: sumQty(candidates.map(c => c.plannedQty)),
+            details: details.map(toPickListDetailDto),
+            boxPlan,
+            warnings
+        };
     });
 }
 
@@ -493,6 +572,7 @@ async function getPickListAsync(pickListId) {
             boxNumber: t.BoxNumber,
             availableQty: Number(t.AvailableQty),
             pickQty: Number(t.PickQty),
+            fullBox: !!t.IsFullBox,
             createdBy: t.CreatedBy,
             createdDate: t.CreatedDate
         })),
@@ -504,72 +584,157 @@ async function getPickListAsync(pickListId) {
 }
 
 /* ================================================================================================
- * Save Pick Transaction
+ * Save Pick Transaction — FULL BOX PICKING ONLY
  * ============================================================================================== */
 
+/** Optional positive quantity from the request (legacy clients); null when absent. */
+function readOptionalQty(value, code, field) {
+    if (value === undefined || value === null || value === '') return null;
+    const qty = toQty(value);
+    if (!Number.isFinite(qty) || qty <= 0) {
+        throw new PickingError(code, `${field} must be a positive number.`);
+    }
+    return qty;
+}
+
+/**
+ * The operator only scans pallet + box: what is picked and how much is read from T_INVENTORY under lock.
+ *   required: pickListId, palletNumber, boxNumber
+ *   optional: location        — when sent, the box must be at that location
+ *             itemCode / pickListDetailId — legacy HHT fields; when sent they must match the box / Pick List
+ *             pickQty         — legacy HHT field; accepted only when it equals the FULL box quantity
+ *                               (of itemCode, or of the whole box) — anything else is PARTIAL_BOX_NOT_ALLOWED
+ *             confirmedBoxQty — the box quantity the operator saw; rejected with BOX_QTY_CHANGED if the box changed since
+ *             clientRequestId — idempotency key (double-tap / network retry)
+ */
 function parsePickRequest(rawRequest) {
     const pickListId = readId(rawRequest && rawRequest.pickListId);
-    const pickListDetailId = readId(rawRequest && rawRequest.pickListDetailId);
-    const itemCode = readString(rawRequest && rawRequest.itemCode);
     const palletNumber = readPalletNumber(rawRequest);
     const boxNumber = readBoxNumber(rawRequest);
-    const location = readString(rawRequest && (rawRequest.location || rawRequest.locationCode));
-    const clientRequestId = readString(rawRequest && rawRequest.clientRequestId) || null;
+    if (!pickListId || isBlank(palletNumber) || isBlank(boxNumber)) {
+        throw new PickingError('MISSING_FIELDS', 'pickListId, palletNumber and boxNumber are required.');
+    }
+    const hasDetailId = rawRequest.pickListDetailId !== undefined && rawRequest.pickListDetailId !== null && rawRequest.pickListDetailId !== '';
+    const pickListDetailId = hasDetailId ? readId(rawRequest.pickListDetailId) : null;
+    if (hasDetailId && !pickListDetailId) {
+        throw new PickingError('INVALID_REQUEST', 'pickListDetailId must be a positive integer.');
+    }
+    const clientRequestId = readString(rawRequest.clientRequestId) || null;
+    if (clientRequestId && clientRequestId.length > 90) {
+        throw new PickingError('INVALID_REQUEST', 'clientRequestId must be at most 90 characters.');
+    }
+    return {
+        pickListId,
+        palletNumber,
+        boxNumber,
+        location: readString(rawRequest.location || rawRequest.locationCode),
+        itemCode: readString(rawRequest.itemCode),
+        pickListDetailId,
+        pickQty: readOptionalQty(rawRequest.pickQty, 'INVALID_PICK_QTY', 'pickQty'),
+        confirmedBoxQty: readOptionalQty(rawRequest.confirmedBoxQty, 'INVALID_REQUEST', 'confirmedBoxQty'),
+        clientRequestId
+    };
+}
 
-    if (!pickListId || !pickListDetailId || isBlank(itemCode) || isBlank(palletNumber) || isBlank(boxNumber) || isBlank(location)) {
-        throw new PickingError('MISSING_FIELDS', 'pickListId, pickListDetailId, itemCode, palletNumber, boxNumber and location are required.');
-    }
-    const rawQty = rawRequest.pickQty;
-    const pickQty = toQty(rawQty);
-    if (rawQty === null || rawQty === undefined || rawQty === '' || !Number.isFinite(pickQty) || pickQty <= 0) {
-        throw new PickingError('INVALID_PICK_QTY', 'pickQty must be a positive number.');
-    }
-    if (clientRequestId && clientRequestId.length > 100) {
-        throw new PickingError('INVALID_REQUEST', 'clientRequestId must be at most 100 characters.');
-    }
-    return { pickListId, pickListDetailId, itemCode, palletNumber, boxNumber, location, pickQty, clientRequestId };
+/** clientRequestId of the n-th row written for one request (1-based); see findPickTransactionsByClientRequestId. */
+function rowRequestId(clientRequestId, n) {
+    if (!clientRequestId) return null;
+    return n === 1 ? clientRequestId : `${clientRequestId}#${n}`;
+}
+
+function excessWarning(boxNumber, items) {
+    const over = items.filter(i => i.excessQty > 0);
+    if (over.length === 0) return null;
+    return `Full box ${boxNumber} picked ${over.map(i => `${i.excessQty} ${i.itemCode}`).join(', ')} more than required. `
+        + 'The actual picked quantity is used for the DC and the Stock Transfer.';
 }
 
 function toSavedPickDto(saved) {
+    const lines = saved.lines || [];
+    const first = lines[0] || {};
+    const items = saved.items || [];
     return {
+        fullBox: true,
         pickListId: saved.pickListId,
-        pickListDetailId: saved.pickListDetailId,
-        pickTransactionId: saved.pickTransactionId,
-        itemCode: saved.itemCode,
-        pickQty: saved.pickQty,
-        pickedQty: saved.pickedQty,
-        remainingQty: saved.remainingQty,
-        detailStatus: saved.detailStatus,
-        pickListStatus: saved.pickListStatus,
-        pickListCompletedPicking: saved.pickListStatus === 'PICKED',
-        source: saved.source,
         palletNumber: saved.palletNumber,
-        palletPickingStatus: saved.palletPickingStatus,
         boxNumber: saved.boxNumber,
-        location: saved.location,
-        inventoryRemainingQty: saved.inventoryRemainingQty,
+        location: saved.location || null,
+        boxQty: saved.boxQty,
+        pickQty: saved.boxQty,                       // always the full box quantity
+        excessQty: saved.excessQty,
+        items,
+        lines,
+        // single-line fields kept for existing clients (first item / source line of the box)
+        pickTransactionId: first.pickTransactionId,
+        pickListDetailId: first.pickListDetailId,
+        itemCode: first.itemCode,
+        pickedQty: first.pickedQty,
+        remainingQty: first.remainingQty,
+        detailStatus: first.detailStatus,
+        source: first.source,
+        pickListStatus: saved.pickListStatus || null,
+        pickListCompletedPicking: saved.pickListStatus === 'PICKED',
+        palletPickingStatus: saved.palletPickingStatus || null,
+        inventoryRemainingQty: saved.duplicate ? null : 0,
+        warning: excessWarning(saved.boxNumber, items),
         duplicate: !!saved.duplicate
     };
 }
 
+function summariseItems(lines) {
+    const byItem = new Map();
+    for (const l of lines) {
+        if (!byItem.has(l.itemCode)) byItem.set(l.itemCode, { itemCode: l.itemCode, boxQty: l.boxQty, excessQty: 0 });
+        const item = byItem.get(l.itemCode);
+        item.excessQty = sumQty([item.excessQty, l.excessQty]);
+    }
+    return [...byItem.values()];
+}
+
 async function duplicatePickResult(req) {
-    const existing = await pickingRepository.findPickTransactionByClientRequestId(req.pickListId, req.clientRequestId);
-    if (!existing) return null;
+    const rows = await pickingRepository.findPickTransactionsByClientRequestId(req.pickListId, req.clientRequestId);
+    if (!rows || rows.length === 0) return null;
+    const lines = rows.map(r => ({
+        pickTransactionId: r.PickTransactionID,
+        pickListDetailId: r.PickListDetailID,
+        itemCode: r.ItemCode,
+        boxQty: Number(r.AvailableQty),
+        pickQty: Number(r.PickQty),
+        excessQty: 0,
+        requestedQty: Number(r.RequestedQty),
+        pickedQty: Number(r.PickedQty),
+        remainingQty: Number(r.RemainingQty)
+    }));
+    // A box line split over several source lines repeats its box qty: count each item once.
+    const boxQty = sumQty([...new Map(rows.map(r => [r.ItemCode, r.AvailableQty])).values()]);
     return toSavedPickDto({
-        pickListId: existing.PickListID,
-        pickListDetailId: existing.PickListDetailID,
-        pickTransactionId: existing.PickTransactionID,
-        itemCode: existing.ItemCode,
-        pickQty: Number(existing.PickQty),
-        remainingQty: Number(existing.RemainingQty),
+        pickListId: rows[0].PickListID,
+        palletNumber: rows[0].PalletNumber,
+        boxNumber: rows[0].BoxNumber,
+        boxQty,
+        excessQty: 0,
+        items: [],
+        lines,
         duplicate: true
     });
 }
 
+/** Throws the most specific "why is there no stock row for this (pallet, box)" error. */
+async function throwMissingBox(palletNumber, boxNumber) {
+    const existsElsewhere = await inventoryRepository.boxExistsInInventory(boxNumber);
+    if (existsElsewhere) {
+        throw new PickingError('BOX_NOT_IN_PALLET', `Box ${boxNumber} does not belong to pallet ${palletNumber}.`);
+    }
+    throw new PickingError('BOX_NOT_FOUND', `Box ${boxNumber} was not found.`);
+}
+
 /**
- * POST /pick — the only mutating picking step for Pick Lists. One transaction, fixed lock order
- * (Pick List header -> detail -> pallet mapping -> inventory row). Every quantity is re-read under lock;
- * the request's quantities are only the operator's intent.
+ * POST /pick — FULL BOX picking, the only mutating picking step for Pick Lists. One transaction, fixed
+ * lock order (Pick List header -> its details -> pallet mapping -> the box's inventory rows). Every
+ * quantity is read under lock: each item line in the box is picked at its FULL quantity, spread over
+ * that item's Pick List lines (excess on the last one), the box's inventory goes to 0 / CLEARED, and one
+ * T_PICKING_HISTORY row per item + one T_PICK_TRANSACTION row per (item, source line) are written.
+ * A box that was already picked has no stock left, so it can never be picked twice.
  */
 async function savePickTransactionAsync(rawRequest, user) {
     const req = parsePickRequest(rawRequest);
@@ -590,108 +755,137 @@ async function savePickTransactionAsync(rawRequest, user) {
                 throw new PickingError('PICKLIST_CLOSED', `Pick List ${header.PickListNumber} is ${header.Status}; no more picks are allowed.`);
             }
 
-            const detail = await pickingRepository.lockPickListDetail(transaction, req.pickListDetailId);
-            if (!detail || Number(detail.PickListID) !== Number(header.PickListID)) {
+            const details = await pickingRepository.lockPickListDetails(transaction, header.PickListID);
+            if (req.pickListDetailId && !details.some(d => Number(d.PickListDetailID) === req.pickListDetailId)) {
                 throw new PickingError('ITEM_NOT_IN_PICKLIST', `Line ${req.pickListDetailId} does not belong to Pick List ${header.PickListNumber}.`);
             }
-            if (!sameCode(detail.ItemCode, req.itemCode)) {
-                throw new PickingError('ITEM_NOT_IN_PICKLIST', `Item ${req.itemCode} does not match Pick List line ${req.pickListDetailId} (${detail.ItemCode}).`);
-            }
-            const remainingRequired = toQty(detail.RemainingQty);
-            if (remainingRequired <= 0) {
-                throw new PickingError('LINE_ALREADY_PICKED', `Item ${detail.ItemCode} of STR ${detail.SourceDocNum} line ${detail.SourceLineNum} is already fully picked.`);
-            }
-            if (req.pickQty > remainingRequired) {
-                throw new PickingError('PICK_QTY_EXCEEDS_REMAINING', `Only ${remainingRequired} of ${detail.ItemCode} is still required; cannot pick ${req.pickQty}.`);
+            if (req.itemCode && !details.some(d => sameCode(d.ItemCode, req.itemCode))) {
+                throw new PickingError('ITEM_NOT_IN_PICKLIST', `Item ${req.itemCode} is not on Pick List ${header.PickListNumber}.`);
             }
 
             const mapping = await palletMappingRepository.lockLatestMappingByPalletId(transaction, req.palletNumber);
             assertPalletPickable(mapping, req.palletNumber);
 
-            const invRow = await inventoryRepository.lockInventoryRow(transaction, {
-                palletMappingId: mapping.PalletMappingID, boxNumber: req.boxNumber, itemCode: detail.ItemCode
+            const boxRows = await inventoryRepository.lockInventoryRowsForBox(transaction, {
+                palletMappingId: mapping.PalletMappingID, boxNumber: req.boxNumber
             });
-            if (!invRow) {
-                await throwMissingInventoryRow(mapping.PalletMappingID, req.palletNumber, req.boxNumber, detail.ItemCode);
+            if (boxRows.length === 0) {
+                await throwMissingBox(req.palletNumber, req.boxNumber);
             }
-            if (!sameCode(invRow.WarehouseCode, detail.FromWarehouse)) {
-                throw new PickingError('WAREHOUSE_MISMATCH', `Box ${req.boxNumber} is in warehouse ${invRow.WarehouseCode}; this Pick List picks from ${detail.FromWarehouse}.`);
-            }
-            if (!sameCode(invRow.LocationCode, req.location)) {
-                throw new PickingError('LOCATION_MISMATCH', `Pallet ${req.palletNumber} is at location ${invRow.LocationCode}, not ${req.location}.`);
-            }
-            const availableQty = invRow.Status === 'AVAILABLE' ? pickableQty(invRow) : 0;
-            if (availableQty <= 0 || req.pickQty > availableQty) {
-                throw new PickingError('INSUFFICIENT_STOCK', `Only ${availableQty} of ${detail.ItemCode} available in box ${req.boxNumber}; cannot pick ${req.pickQty}.`);
+            if (req.location) {
+                const elsewhere = boxRows.find(r => !sameCode(r.LocationCode, req.location));
+                if (elsewhere) {
+                    throw new PickingError('LOCATION_MISMATCH', `Pallet ${req.palletNumber} is at location ${elsewhere.LocationCode}, not ${req.location}.`);
+                }
             }
 
-            // 1-3. Detail PickedQty / RemainingQty (guarded UPDATE — cannot over-pick even under a race).
-            const updatedDetail = await pickingRepository.applyPickToDetail(transaction, detail.PickListDetailID, req.pickQty);
-            if (!updatedDetail) {
-                throw new PickingError('PICK_QTY_EXCEEDS_REMAINING', `Pick quantity exceeds the remaining required quantity for ${detail.ItemCode}.`);
-            }
-
-            // 4. Reduce WMS inventory exactly like the existing picking flow (Quantity down, CLEARED at 0).
-            const inventoryRemainingQty = subtractQty(invRow.Quantity, req.pickQty);
-            await inventoryRepository.deductInventoryQty(transaction, invRow.InventoryID, { remainingQty: inventoryRemainingQty, updatedBy: createdBy });
-
-            // Keeps the existing Picking History report complete.
-            const historyRow = await pickingRepository.insertPickingHistory(transaction, {
-                inventoryId: invRow.InventoryID,
-                palletMappingId: mapping.PalletMappingID,
-                palletId: mapping.PalletID,
-                boxNumber: req.boxNumber,
-                itemCode: detail.ItemCode,
-                itemGroup: invRow.ItemGroup,
-                warehouseCode: invRow.WarehouseCode,
-                locationCode: invRow.LocationCode,
-                pickedQty: req.pickQty,
-                remainingQty: inventoryRemainingQty,
-                pickedBy: createdBy
+            const box = evaluateFullBox({
+                boxRows, details, boxNumber: req.boxNumber, palletNumber: req.palletNumber,
+                pickListNumber: header.PickListNumber, fromWarehouse: header.FromWarehouse
             });
 
-            const box = await palletMappingRepository.findMappingBoxByBoxNumber(req.boxNumber, transaction);
-            const pickTransaction = await pickingRepository.insertPickTransaction(transaction, {
-                pickListId: header.PickListID,
-                pickListDetailId: detail.PickListDetailID,
-                sourceDocEntry: detail.SourceDocEntry,
-                sourceDocNum: detail.SourceDocNum,
-                sourceLineNum: detail.SourceLineNum,
-                itemCode: detail.ItemCode,
-                warehouse: invRow.WarehouseCode,
-                locationId: invRow.LocationID,
-                location: invRow.LocationCode,
-                inventoryId: invRow.InventoryID,
-                palletMappingId: mapping.PalletMappingID,
-                palletNumber: mapping.PalletID,
-                boxId: box && Number(box.PalletMappingID) === Number(mapping.PalletMappingID) ? box.PalletMappingBoxID : null,
-                boxNumber: req.boxNumber,
-                availableQty,
-                pickQty: req.pickQty,
-                pickingHistoryId: historyRow && historyRow.PickingID,
-                clientRequestId: req.clientRequestId,
-                createdBy
-            });
+            if (req.itemCode && !box.lines.some(l => sameCode(l.row.ItemCode, req.itemCode))) {
+                throw new PickingError('ITEM_NOT_IN_BOX', `Item ${req.itemCode} is not in box ${req.boxNumber}.`);
+            }
+            if (req.pickQty !== null) {
+                const itemLine = req.itemCode ? box.lines.find(l => sameCode(l.row.ItemCode, req.itemCode)) : null;
+                const fullQty = itemLine ? itemLine.boxQty : box.totalBoxQty;
+                if (req.pickQty !== fullQty) {
+                    throw new PickingError('PARTIAL_BOX_NOT_ALLOWED',
+                        `Partial box picking is not allowed. Box ${req.boxNumber} holds ${fullQty}`
+                        + `${itemLine ? ` of ${itemLine.row.ItemCode}` : ''}; the whole box is picked (${req.pickQty} was requested).`,
+                        { boxQty: fullQty });
+                }
+            }
+            if (req.confirmedBoxQty !== null && req.confirmedBoxQty !== box.totalBoxQty) {
+                throw new PickingError('BOX_QTY_CHANGED',
+                    `Box ${req.boxNumber} now holds ${box.totalBoxQty}, not ${req.confirmedBoxQty}. Scan the box again.`,
+                    { boxQty: box.totalBoxQty });
+            }
+
+            const mappingBox = await palletMappingRepository.findMappingBoxByBoxNumber(req.boxNumber, transaction);
+            const boxId = mappingBox && Number(mappingBox.PalletMappingID) === Number(mapping.PalletMappingID) ? mappingBox.PalletMappingBoxID : null;
+
+            const lines = [];
+            let rowNumber = 0;
+            for (const line of box.lines) {
+                const row = line.row;
+                // The whole line leaves the box: Quantity -> 0, Status -> CLEARED.
+                await inventoryRepository.deductInventoryQty(transaction, row.InventoryID, { remainingQty: 0, updatedBy: createdBy });
+
+                const historyRow = await pickingRepository.insertPickingHistory(transaction, {
+                    inventoryId: row.InventoryID,
+                    palletMappingId: mapping.PalletMappingID,
+                    palletId: mapping.PalletID,
+                    boxNumber: req.boxNumber,
+                    itemCode: row.ItemCode,
+                    itemGroup: row.ItemGroup,
+                    warehouseCode: row.WarehouseCode,
+                    locationCode: row.LocationCode,
+                    pickedQty: line.boxQty,
+                    remainingQty: 0,
+                    pickedBy: createdBy
+                });
+
+                for (const allocation of line.allocations) {
+                    const detail = allocation.line;
+                    const updated = await pickingRepository.applyFullBoxPickToDetail(transaction, detail.PickListDetailID, allocation.qty);
+                    if (!updated) {
+                        throw new PickingError('PICK_UPDATE_FAILED', `Pick List line ${detail.PickListDetailID} could not be updated.`);
+                    }
+                    rowNumber += 1;
+                    const pickTransaction = await pickingRepository.insertPickTransaction(transaction, {
+                        pickListId: header.PickListID,
+                        pickListDetailId: detail.PickListDetailID,
+                        sourceDocEntry: detail.SourceDocEntry,
+                        sourceDocNum: detail.SourceDocNum,
+                        sourceLineNum: detail.SourceLineNum,
+                        itemCode: detail.ItemCode,
+                        warehouse: row.WarehouseCode,
+                        locationId: row.LocationID,
+                        location: row.LocationCode,
+                        inventoryId: row.InventoryID,
+                        palletMappingId: mapping.PalletMappingID,
+                        palletNumber: mapping.PalletID,
+                        boxId,
+                        boxNumber: req.boxNumber,
+                        availableQty: line.boxQty,        // the full box quantity of this item
+                        pickQty: allocation.qty,
+                        isFullBox: true,
+                        pickingHistoryId: historyRow && historyRow.PickingID,
+                        clientRequestId: rowRequestId(req.clientRequestId, rowNumber),
+                        createdBy
+                    });
+                    lines.push({
+                        pickTransactionId: pickTransaction.PickTransactionID,
+                        pickListDetailId: detail.PickListDetailID,
+                        itemCode: detail.ItemCode,
+                        source: { docEntry: detail.SourceDocEntry, docNum: detail.SourceDocNum, lineNum: detail.SourceLineNum },
+                        boxQty: line.boxQty,
+                        pickQty: allocation.qty,
+                        excessQty: allocation.excessQty,
+                        requestedQty: Number(updated.RequestedQty),
+                        pickedQty: Number(updated.PickedQty),
+                        remainingQty: Number(updated.RemainingQty),
+                        detailStatus: updated.Status
+                    });
+                }
+            }
 
             const progress = await pickingRepository.refreshPickListProgress(transaction, header.PickListID, createdBy);
             const palletPickingStatus = await refreshPalletPickingStatus(transaction, mapping.PalletMappingID);
 
             return {
                 pickListId: header.PickListID,
-                pickListDetailId: detail.PickListDetailID,
-                pickTransactionId: pickTransaction.PickTransactionID,
-                itemCode: detail.ItemCode,
-                pickQty: req.pickQty,
-                pickedQty: Number(updatedDetail.PickedQty),
-                remainingQty: Number(updatedDetail.RemainingQty),
-                detailStatus: updatedDetail.Status,
-                pickListStatus: progress ? progress.Status : header.Status,
-                source: { docEntry: detail.SourceDocEntry, docNum: detail.SourceDocNum, lineNum: detail.SourceLineNum },
                 palletNumber: mapping.PalletID,
-                palletPickingStatus,
                 boxNumber: req.boxNumber,
-                location: invRow.LocationCode,
-                inventoryRemainingQty
+                location: box.lines[0].row.LocationCode,
+                boxQty: box.totalBoxQty,
+                excessQty: box.totalExcessQty,
+                items: summariseItems(lines),
+                lines,
+                pickListStatus: progress ? progress.Status : header.Status,
+                palletPickingStatus
             };
         });
         return toSavedPickDto(saved);
@@ -749,7 +943,9 @@ async function validateAndBeginCompletion(pickListId, completedBy, processingTok
         if (details.length === 0) {
             throw new PickingError('PICKING_INCOMPLETE', `Pick List ${header.PickListNumber} has no lines.`);
         }
-        const pending = details.filter(d => toQty(d.RemainingQty) > 0 || toQty(d.PickedQty) !== toQty(d.RequestedQty));
+        // Full Box Picking: a line is complete once its picked quantity covers the required quantity —
+        // PickedQty may exceed RequestedQty (excess of whole boxes), never fall short of it.
+        const pending = details.filter(d => toQty(d.RemainingQty) > 0 || toQty(d.PickedQty) < toQty(d.RequestedQty));
         if (pending.length > 0) {
             throw new PickingError('PICKING_INCOMPLETE',
                 `Pick List ${header.PickListNumber} still has ${pending.length} line(s) with remaining quantity.`,
@@ -770,7 +966,13 @@ async function validateAndBeginCompletion(pickListId, completedBy, processingTok
         }
 
         await pickingRepository.beginCompletion(transaction, pickListId, { completedBy, processingToken });
-        return { alreadyCompleted: false, header };
+        const requiredQty = sumQty(details.map(d => d.RequestedQty));
+        const pickedQty = sumQty(details.map(d => d.PickedQty));
+        return {
+            alreadyCompleted: false,
+            header,
+            totals: { requiredQty, pickedQty, excessQty: sumQty(details.map(d => excessOf(d.RequestedQty, d.PickedQty))) }
+        };
     });
 }
 
@@ -802,7 +1004,14 @@ async function completePickListAsync(pickListIdRaw, user) {
     if (begun.alreadyCompleted) {
         return completionSummary(begun.header, { alreadyCompleted: true });
     }
-    await pickingRepository.insertProcessLog({ pickListId, stage: 'VALIDATION', result: 'SUCCESS', message: 'All lines fully picked.', createdBy: actor });
+    const { totals } = begun;
+    await pickingRepository.insertProcessLog({
+        pickListId, stage: 'VALIDATION', result: 'SUCCESS',
+        message: totals.excessQty > 0
+            ? `All lines fully picked by full boxes: required ${totals.requiredQty}, picked ${totals.pickedQty} (excess ${totals.excessQty}). DC and Stock Transfer use the picked quantity.`
+            : `All lines fully picked (${totals.pickedQty}).`,
+        createdBy: actor
+    });
 
     let dc;
     try {
@@ -839,6 +1048,10 @@ async function completePickListAsync(pickListIdRaw, user) {
     return completionSummary(header, {
         alreadyCompleted: false,
         dcNumber: dc.dcNumber,
+        dcQty: dc.totalQty !== undefined ? Number(dc.totalQty) : totals.pickedQty,
+        requiredQty: totals.requiredQty,
+        pickedQty: totals.pickedQty,
+        excessQty: totals.excessQty,
         stockTransferDocEntry: stockTransfer.docEntry,
         stockTransferNumber: stockTransfer.docNum !== undefined && stockTransfer.docNum !== null ? String(stockTransfer.docNum) : null
     });

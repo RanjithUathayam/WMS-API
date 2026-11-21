@@ -63,11 +63,13 @@ async function insertDCDetail(transaction, { dcId, pickListDetailId, sourceDocEn
 
 async function getDCDetails(dcId) {
     return sequelize.query(`
-        SELECT DCDetailID, DCID, PickListDetailID, SourceDocEntry, SourceDocNum, SourceLineNum,
-               ItemCode, ItemName, Quantity, FromWarehouse, ToWarehouse
-        FROM T_DC_DETAIL WITH (NOLOCK)
-        WHERE DCID = :dcId
-        ORDER BY SourceDocNum, SourceLineNum
+        SELECT dd.DCDetailID, dd.DCID, dd.PickListDetailID, dd.SourceDocEntry, dd.SourceDocNum, dd.SourceLineNum,
+               dd.ItemCode, dd.ItemName, dd.Quantity, dd.FromWarehouse, dd.ToWarehouse,
+               pld.RequestedQty
+        FROM T_DC_DETAIL dd WITH (NOLOCK)
+        LEFT JOIN T_PICK_LIST_DETAIL pld WITH (NOLOCK) ON pld.PickListDetailID = dd.PickListDetailID
+        WHERE dd.DCID = :dcId
+        ORDER BY dd.SourceDocNum, dd.SourceLineNum
     `, {
         replacements: { dcId },
         type: QueryTypes.SELECT

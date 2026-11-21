@@ -82,23 +82,49 @@ describe('scanBoxForPickListAsync', () => {
             .rejects.toMatchObject({ code: 'BOX_NOT_IN_PALLET' });
     });
 
-    test('BOX_NOT_APPLICABLE when the box holds no required item', async () => {
+    test('BOX_HAS_UNLISTED_ITEMS when the box holds an item that is not on the Pick List', async () => {
         inventoryRepository.getInventoryByPalletAndBox.mockResolvedValue([inv({ ItemCode: 'OTHER' })]);
+        await expect(service.scanBoxForPickListAsync({ pickListId: 100, palletNumber: 'PAL001', boxNumber: 'BOX001' }))
+            .rejects.toMatchObject({ code: 'BOX_HAS_UNLISTED_ITEMS' });
+    });
+
+    test('BOX_NOT_APPLICABLE when every item of the box is already fully picked', async () => {
+        pickingRepository.getPickListDetails.mockResolvedValue(DETAILS.map(d => ({ ...d, PickedQty: d.RequestedQty, RemainingQty: 0 })));
+        inventoryRepository.getInventoryByPalletAndBox.mockResolvedValue([inv()]);
         await expect(service.scanBoxForPickListAsync({ pickListId: 100, palletNumber: 'PAL001', boxNumber: 'BOX001' }))
             .rejects.toMatchObject({ code: 'BOX_NOT_APPLICABLE' });
     });
 
-    test('INSUFFICIENT_STOCK when the required item is already cleared from the box', async () => {
+    test('BOX_ALREADY_PICKED when the box has been cleared', async () => {
         inventoryRepository.getInventoryByPalletAndBox.mockResolvedValue([inv({ Quantity: 0, Status: 'CLEARED' })]);
         await expect(service.scanBoxForPickListAsync({ pickListId: 100, palletNumber: 'PAL001', boxNumber: 'BOX001' }))
-            .rejects.toMatchObject({ code: 'INSUFFICIENT_STOCK' });
+            .rejects.toMatchObject({ code: 'BOX_ALREADY_PICKED' });
     });
 
-    test('returns the item and its available quantity', async () => {
-        inventoryRepository.getInventoryByPalletAndBox.mockResolvedValue([inv()]);
+    test('previews the full box: whole quantity, excess and how it is split over the source lines', async () => {
+        // remaining: line 1 = 15, line 2 = 10 (total 25); the box holds 30
+        inventoryRepository.getInventoryByPalletAndBox.mockResolvedValue([inv({ Quantity: 30 })]);
         palletMappingRepository.findMappingBoxByBoxNumber.mockResolvedValue({ PalletMappingBoxID: 77, PalletMappingID: 1 });
         const result = await service.scanBoxForPickListAsync({ pickListId: 100, palletNumber: 'PAL001', boxNumber: 'BOX001' });
-        expect(result).toMatchObject({ boxId: 77, boxNumber: 'BOX001' });
-        expect(result.items[0]).toMatchObject({ itemCode: 'FG0001', pickableQty: 10 });
+        expect(result).toMatchObject({ boxId: 77, boxNumber: 'BOX001', fullBox: true, totalBoxQty: 30, totalRequiredQty: 25, totalExcessQty: 5 });
+        expect(result.items[0]).toMatchObject({ itemCode: 'FG0001', fullBoxQty: 30, suggestedPickQty: 30, excessQty: 5 });
+        expect(result.items[0].allocations).toEqual([
+            { pickListDetailId: 1, sourceDocNum: 50001, sourceLineNum: 0, qty: 15, excessQty: 0 },
+            { pickListDetailId: 2, sourceDocNum: 50002, sourceLineNum: 0, qty: 15, excessQty: 5 }
+        ]);
+    });
+});
+
+describe('getPickListInventoryAsync — full box suggestions', () => {
+    test('suggests whole boxes for the remaining quantity', async () => {
+        // remaining 25 for FG0001; the smallest single box that covers 25 is the 40 box
+        inventoryRepository.getPickableInventoryForItems.mockResolvedValue([
+            inv({ InventoryID: 10, BoxNumber: 'BOX-A', Quantity: 40 }),
+            inv({ InventoryID: 11, BoxNumber: 'BOX-B', Quantity: 18 }),
+            inv({ InventoryID: 12, BoxNumber: 'BOX-C', Quantity: 12 })
+        ]);
+        const result = await service.getPickListInventoryAsync(100);
+        expect(result.itemSummary[0]).toMatchObject({ remainingQty: 25, suggestedPickQty: 40, suggestedExcessQty: 15 });
+        expect(result.itemSummary[0].suggestedBoxes.map(b => b.boxNumber)).toEqual(['BOX-A']);
     });
 });

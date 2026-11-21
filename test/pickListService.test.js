@@ -65,6 +65,7 @@ describe('createPickListAsync', () => {
             { DocEntry: 1002, DocNum: 50002, DocStatus: 'O', Canceled: 'N' }
         ]);
         pickingRepository.getReservedQtyBySourceLines.mockResolvedValue([]);
+        inventoryRepository.getPickableInventoryForItems.mockResolvedValue([]);
         pickingRepository.insertPickListHeader.mockImplementation(async (tx, h) => ({
             PickListID: 100, PickListNumber: 'PL000100', Status: 'OPEN', FromWarehouse: h.fromWarehouse,
             ToWarehouse: h.toWarehouse, TotalRequestedQty: h.totalRequestedQty, CreatedBy: h.createdBy
@@ -139,35 +140,170 @@ describe('createPickListAsync', () => {
             fromWarehouse: 'INTRTHDL', toWarehouse: 'INTRATTM', totalRequestedQty: 37, createdBy: 'operator1'
         }));
     });
+
+    test('full box plan: required 10 with a 25 box plans the whole 25 (excess 15)', async () => {
+        pickingRepository.getOpenTransferRequestLines.mockResolvedValue([strLine({ OpenQty: 10 })]);
+        inventoryRepository.getPickableInventoryForItems.mockResolvedValue([
+            invRow({ InventoryID: 10, BoxNumber: 'BOX001', Quantity: 25 })
+        ]);
+        const result = await service.createPickListAsync({ documents: [{ docEntry: 1001, docNum: 50001 }] }, USER);
+
+        expect(pickingRepository.insertPickListDetail).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ requestedQty: 10, plannedQty: 25 }));
+        expect(result.boxPlan).toEqual([expect.objectContaining({
+            itemCode: 'FG0001', requiredQty: 10, plannedQty: 25, excessQty: 15, shortageQty: 0,
+            boxes: [expect.objectContaining({ boxNumber: 'BOX001', boxQty: 25 })]
+        })]);
+        expect(result.totalPlannedQty).toBe(25);
+        expect(result.warnings[0]).toContain('excess 15');
+    });
+
+    test('full box plan prefers the smallest box that covers the requirement, and spreads excess to the item\'s last line', async () => {
+        pickingRepository.getOpenTransferRequestLines.mockResolvedValue([
+            strLine({ DocEntry: 1001, DocNum: 50001, LineNum: 0, OpenQty: 10 }),
+            strLine({ DocEntry: 1002, DocNum: 50002, LineNum: 0, OpenQty: 6 })
+        ]);
+        inventoryRepository.getPickableInventoryForItems.mockResolvedValue([
+            invRow({ InventoryID: 10, BoxNumber: 'BOX-A', Quantity: 40 }),
+            invRow({ InventoryID: 11, BoxNumber: 'BOX-B', Quantity: 18 }),
+            invRow({ InventoryID: 12, BoxNumber: 'BOX-C', Quantity: 12 }),
+            invRow({ InventoryID: 13, BoxNumber: 'BOX-D', Quantity: 5, AllocatedQty: 1 })  // cannot be taken whole
+        ]);
+        const result = await service.createPickListAsync({
+            documents: [{ docEntry: 1001, docNum: 50001 }, { docEntry: 1002, docNum: 50002 }]
+        }, USER);
+
+        expect(result.boxPlan[0]).toMatchObject({ requiredQty: 16, plannedQty: 18, excessQty: 2 });
+        expect(result.boxPlan[0].boxes.map(b => b.boxNumber)).toEqual(['BOX-B']);
+        expect(pickingRepository.insertPickListDetail.mock.calls.map(c => [c[1].requestedQty, c[1].plannedQty])).toEqual([[10, 10], [6, 8]]);
+    });
+
+    test('full box plan reports a shortage but still creates the Pick List', async () => {
+        pickingRepository.getOpenTransferRequestLines.mockResolvedValue([strLine({ OpenQty: 30 })]);
+        inventoryRepository.getPickableInventoryForItems.mockResolvedValue([
+            invRow({ InventoryID: 10, BoxNumber: 'BOX001', Quantity: 12 }),
+            invRow({ InventoryID: 11, BoxNumber: 'BOX002', Quantity: 8 })
+        ]);
+        const result = await service.createPickListAsync({ documents: [{ docEntry: 1001, docNum: 50001 }] }, USER);
+        expect(result.boxPlan[0]).toMatchObject({ requiredQty: 30, plannedQty: 30, excessQty: 0, shortageQty: 10 });
+        expect(result.warnings[0]).toContain('short 10');
+    });
 });
 
-describe('savePickTransactionAsync', () => {
-    const REQUEST = {
-        pickListId: 100, pickListDetailId: 1001, itemCode: 'FG0001',
-        palletNumber: 'PAL001', boxNumber: 'BOX001', location: 'A01-01', pickQty: 10
-    };
+describe('savePickTransactionAsync — full box picking', () => {
+    const REQUEST = { pickListId: 100, palletNumber: 'PAL001', boxNumber: 'BOX001', clientRequestId: 'hht-1' };
 
     beforeEach(() => {
+        pickingRepository.findPickTransactionsByClientRequestId.mockResolvedValue([]);
         pickingRepository.lockPickListById.mockResolvedValue(header());
-        pickingRepository.lockPickListDetail.mockResolvedValue(detail());
+        // Required 10, nothing picked yet.
+        pickingRepository.lockPickListDetails.mockResolvedValue([detail({ RequestedQty: 10, PickedQty: 0, RemainingQty: 10, Status: 'OPEN' })]);
         palletMappingRepository.lockLatestMappingByPalletId.mockResolvedValue({ PalletMappingID: 1, PalletID: 'PAL001', Status: 'COMPLETED', PickingStatus: null });
-        inventoryRepository.lockInventoryRow.mockResolvedValue(invRow());
-        pickingRepository.applyPickToDetail.mockResolvedValue({ PickListDetailID: 1001, RequestedQty: 20, PickedQty: 15, RemainingQty: 5, Status: 'PARTIAL' });
+        // The box holds 25.
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([invRow({ Quantity: 25 })]);
+        pickingRepository.applyFullBoxPickToDetail.mockImplementation(async (tx, id, qty) => ({
+            PickListDetailID: id, RequestedQty: 10, PickedQty: qty, RemainingQty: Math.max(10 - qty, 0), Status: qty >= 10 ? 'PICKED' : 'PARTIAL'
+        }));
         inventoryRepository.deductInventoryQty.mockResolvedValue();
         pickingRepository.insertPickingHistory.mockResolvedValue({ PickingID: 555 });
         palletMappingRepository.findMappingBoxByBoxNumber.mockResolvedValue({ PalletMappingBoxID: 77, PalletMappingID: 1 });
-        pickingRepository.insertPickTransaction.mockResolvedValue({ PickTransactionID: 9001 });
-        pickingRepository.refreshPickListProgress.mockResolvedValue({ Status: 'IN_PROGRESS' });
+        let txId = 9001;
+        pickingRepository.insertPickTransaction.mockImplementation(async () => ({ PickTransactionID: txId++ }));
+        pickingRepository.refreshPickListProgress.mockResolvedValue({ Status: 'PICKED' });
         inventoryRepository.countAvailableInventoryForPallet.mockResolvedValue(0);
         pickingRepository.updatePalletPickingStatus.mockResolvedValue();
     });
 
-    test('rejects missing location', async () => {
-        await expect(service.savePickTransactionAsync({ ...REQUEST, location: '' }, USER)).rejects.toMatchObject({ code: 'MISSING_FIELDS' });
+    test('requires pallet and box', async () => {
+        await expect(service.savePickTransactionAsync({ pickListId: 100, palletNumber: 'PAL001' }, USER)).rejects.toMatchObject({ code: 'MISSING_FIELDS' });
     });
 
-    test('rejects a non-positive pickQty', async () => {
-        await expect(service.savePickTransactionAsync({ ...REQUEST, pickQty: 0 }, USER)).rejects.toMatchObject({ code: 'INVALID_PICK_QTY' });
+    test('required 10, box 25: picks the whole 25, records excess 15, clears the box', async () => {
+        const result = await service.savePickTransactionAsync(REQUEST, USER);
+
+        expect(pickingRepository.applyFullBoxPickToDetail).toHaveBeenCalledWith(expect.anything(), 1001, 25);
+        expect(inventoryRepository.deductInventoryQty).toHaveBeenCalledWith(expect.anything(), 10, { remainingQty: 0, updatedBy: 'operator1' });
+        expect(pickingRepository.insertPickingHistory).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ pickedQty: 25, remainingQty: 0 }));
+        expect(pickingRepository.insertPickTransaction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+            pickListId: 100, pickListDetailId: 1001, sourceDocEntry: 1001, sourceDocNum: 50001, sourceLineNum: 0,
+            warehouse: 'INTRTHDL', location: 'A01-01', palletNumber: 'PAL001', boxId: 77, boxNumber: 'BOX001',
+            availableQty: 25, pickQty: 25, isFullBox: true, pickingHistoryId: 555, clientRequestId: 'hht-1'
+        }));
+        expect(pickingRepository.updatePalletPickingStatus).toHaveBeenCalledWith(expect.anything(), 1, 'COMPLETED');
+        expect(result).toMatchObject({
+            fullBox: true, boxQty: 25, pickQty: 25, excessQty: 15, pickedQty: 25, remainingQty: 0,
+            pickListStatus: 'PICKED', duplicate: false, items: [{ itemCode: 'FG0001', boxQty: 25, excessQty: 15 }]
+        });
+        expect(result.warning).toContain('15 FG0001');
+    });
+
+    test('spreads one box over the item\'s source lines in order; the excess goes on the last one', async () => {
+        pickingRepository.lockPickListDetails.mockResolvedValue([
+            detail({ PickListDetailID: 1001, SourceLineNum: 0, RequestedQty: 10, PickedQty: 0, RemainingQty: 10 }),
+            detail({ PickListDetailID: 1002, SourceDocEntry: 1002, SourceDocNum: 50002, SourceLineNum: 0, RequestedQty: 8, PickedQty: 0, RemainingQty: 8 })
+        ]);
+        const result = await service.savePickTransactionAsync(REQUEST, USER);
+
+        expect(pickingRepository.applyFullBoxPickToDetail.mock.calls.map(c => [c[1], c[2]])).toEqual([[1001, 10], [1002, 15]]);
+        const txs = pickingRepository.insertPickTransaction.mock.calls.map(c => c[1]);
+        expect(txs.map(t => [t.pickListDetailId, t.availableQty, t.pickQty, t.clientRequestId])).toEqual([
+            [1001, 25, 10, 'hht-1'], [1002, 25, 15, 'hht-1#2']
+        ]);
+        // one history row / one inventory deduction for the one box line
+        expect(pickingRepository.insertPickingHistory).toHaveBeenCalledTimes(1);
+        expect(result.excessQty).toBe(7);
+    });
+
+    test('a box with several items picks every item line in full', async () => {
+        pickingRepository.lockPickListDetails.mockResolvedValue([
+            detail({ PickListDetailID: 1001, ItemCode: 'FG0001', RequestedQty: 10, PickedQty: 0, RemainingQty: 10 }),
+            detail({ PickListDetailID: 1003, SourceLineNum: 1, ItemCode: 'FG0002', RequestedQty: 4, PickedQty: 0, RemainingQty: 4 })
+        ]);
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([
+            invRow({ InventoryID: 10, ItemCode: 'FG0001', Quantity: 10 }),
+            invRow({ InventoryID: 11, ItemCode: 'FG0002', Quantity: 6 })
+        ]);
+        const result = await service.savePickTransactionAsync(REQUEST, USER);
+
+        expect(inventoryRepository.deductInventoryQty.mock.calls.map(c => c[1])).toEqual([10, 11]);
+        expect(result).toMatchObject({ boxQty: 16, excessQty: 2 });
+        expect(result.items).toEqual([
+            { itemCode: 'FG0001', boxQty: 10, excessQty: 0 },
+            { itemCode: 'FG0002', boxQty: 6, excessQty: 2 }
+        ]);
+    });
+
+    test('rejects a partial quantity (legacy pickQty below the box quantity) and writes nothing', async () => {
+        await expect(service.savePickTransactionAsync({ ...REQUEST, itemCode: 'FG0001', pickQty: 10 }, USER))
+            .rejects.toMatchObject({ code: 'PARTIAL_BOX_NOT_ALLOWED', data: { boxQty: 25 } });
+        expect(inventoryRepository.deductInventoryQty).not.toHaveBeenCalled();
+        expect(pickingRepository.insertPickTransaction).not.toHaveBeenCalled();
+    });
+
+    test('accepts a legacy pickQty equal to the full box quantity', async () => {
+        const result = await service.savePickTransactionAsync({ ...REQUEST, itemCode: 'FG0001', pickQty: 25 }, USER);
+        expect(result.boxQty).toBe(25);
+    });
+
+    test('rejects when the box changed since the operator confirmed it', async () => {
+        await expect(service.savePickTransactionAsync({ ...REQUEST, confirmedBoxQty: 20 }, USER))
+            .rejects.toMatchObject({ code: 'BOX_QTY_CHANGED' });
+    });
+
+    test('a box that was already picked cannot be picked again', async () => {
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([invRow({ Quantity: 0, Status: 'CLEARED' })]);
+        await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'BOX_ALREADY_PICKED' });
+        expect(pickingRepository.applyFullBoxPickToDetail).not.toHaveBeenCalled();
+    });
+
+    test('rejects a box that also holds an item that is not on the Pick List', async () => {
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([invRow(), invRow({ InventoryID: 12, ItemCode: 'OTHER', Quantity: 3 })]);
+        await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'BOX_HAS_UNLISTED_ITEMS' });
+        expect(inventoryRepository.deductInventoryQty).not.toHaveBeenCalled();
+    });
+
+    test('rejects a box whose items are all fully picked already', async () => {
+        pickingRepository.lockPickListDetails.mockResolvedValue([detail({ RequestedQty: 10, PickedQty: 25, RemainingQty: 0, Status: 'PICKED' })]);
+        await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'BOX_NOT_APPLICABLE' });
     });
 
     test('rejects a completed Pick List', async () => {
@@ -175,17 +311,8 @@ describe('savePickTransactionAsync', () => {
         await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'PICKLIST_CLOSED' });
     });
 
-    test('rejects a detail from another Pick List', async () => {
-        pickingRepository.lockPickListDetail.mockResolvedValue(detail({ PickListID: 999 }));
-        await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'ITEM_NOT_IN_PICKLIST' });
-    });
-
-    test('rejects an item that does not match the line', async () => {
-        await expect(service.savePickTransactionAsync({ ...REQUEST, itemCode: 'FG0002' }, USER)).rejects.toMatchObject({ code: 'ITEM_NOT_IN_PICKLIST' });
-    });
-
-    test('rejects a pick above the remaining required quantity', async () => {
-        await expect(service.savePickTransactionAsync({ ...REQUEST, pickQty: 16 }, USER)).rejects.toMatchObject({ code: 'PICK_QTY_EXCEEDS_REMAINING' });
+    test('rejects a detail id from another Pick List', async () => {
+        await expect(service.savePickTransactionAsync({ ...REQUEST, pickListDetailId: 4242 }, USER)).rejects.toMatchObject({ code: 'ITEM_NOT_IN_PICKLIST' });
     });
 
     test('rejects a location that does not match the pallet', async () => {
@@ -193,44 +320,31 @@ describe('savePickTransactionAsync', () => {
     });
 
     test('rejects stock from another warehouse', async () => {
-        inventoryRepository.lockInventoryRow.mockResolvedValue(invRow({ WarehouseCode: 'OTHER' }));
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([invRow({ WarehouseCode: 'OTHER' })]);
         await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'WAREHOUSE_MISMATCH' });
     });
 
-    test('rejects when the server-side available quantity is lower than pickQty', async () => {
-        inventoryRepository.lockInventoryRow.mockResolvedValue(invRow({ Quantity: 6 }));
-        await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'INSUFFICIENT_STOCK' });
-        expect(inventoryRepository.deductInventoryQty).not.toHaveBeenCalled();
-        expect(pickingRepository.insertPickTransaction).not.toHaveBeenCalled();
+    test('rejects a box with quantity allocated elsewhere', async () => {
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([invRow({ Quantity: 25, AllocatedQty: 5 })]);
+        await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'BOX_PARTIALLY_ALLOCATED' });
     });
 
     test('rejects a box that is on another pallet', async () => {
-        inventoryRepository.lockInventoryRow.mockResolvedValue(null);
-        inventoryRepository.getInventoryByPalletAndBox.mockResolvedValue([]);
+        inventoryRepository.lockInventoryRowsForBox.mockResolvedValue([]);
         inventoryRepository.boxExistsInInventory.mockResolvedValue(true);
         await expect(service.savePickTransactionAsync(REQUEST, USER)).rejects.toMatchObject({ code: 'BOX_NOT_IN_PALLET' });
     });
 
-    test('saves the transaction, updates the line, reduces inventory and keeps the source refs', async () => {
+    test('a repeated clientRequestId returns the original full box pick without writing again', async () => {
+        pickingRepository.findPickTransactionsByClientRequestId.mockResolvedValue([
+            { PickTransactionID: 9001, PickListID: 100, PickListDetailID: 1001, ItemCode: 'FG0001', PalletNumber: 'PAL001', BoxNumber: 'BOX001',
+              AvailableQty: 25, PickQty: 10, RequestedQty: 10, PickedQty: 10, RemainingQty: 0 },
+            { PickTransactionID: 9002, PickListID: 100, PickListDetailID: 1002, ItemCode: 'FG0001', PalletNumber: 'PAL001', BoxNumber: 'BOX001',
+              AvailableQty: 25, PickQty: 15, RequestedQty: 8, PickedQty: 15, RemainingQty: 0 }
+        ]);
         const result = await service.savePickTransactionAsync(REQUEST, USER);
-
-        expect(pickingRepository.applyPickToDetail).toHaveBeenCalledWith(expect.anything(), 1001, 10);
-        expect(inventoryRepository.deductInventoryQty).toHaveBeenCalledWith(expect.anything(), 10, { remainingQty: 0, updatedBy: 'operator1' });
-        expect(pickingRepository.insertPickTransaction).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
-            pickListId: 100, pickListDetailId: 1001, sourceDocEntry: 1001, sourceDocNum: 50001, sourceLineNum: 0,
-            warehouse: 'INTRTHDL', location: 'A01-01', palletNumber: 'PAL001', boxId: 77, boxNumber: 'BOX001',
-            availableQty: 10, pickQty: 10, pickingHistoryId: 555
-        }));
-        expect(pickingRepository.updatePalletPickingStatus).toHaveBeenCalledWith(expect.anything(), 1, 'COMPLETED');
-        expect(result).toMatchObject({ pickListId: 100, itemCode: 'FG0001', pickQty: 10, remainingQty: 5, duplicate: false });
-    });
-
-    test('a repeated clientRequestId returns the original pick without writing again', async () => {
-        pickingRepository.findPickTransactionByClientRequestId.mockResolvedValue({
-            PickTransactionID: 9001, PickListID: 100, PickListDetailID: 1001, ItemCode: 'FG0001', PickQty: 10, RemainingQty: 5
-        });
-        const result = await service.savePickTransactionAsync({ ...REQUEST, clientRequestId: 'hht-1' }, USER);
-        expect(result).toMatchObject({ duplicate: true, pickTransactionId: 9001 });
+        expect(result).toMatchObject({ duplicate: true, pickTransactionId: 9001, boxQty: 25, boxNumber: 'BOX001' });
+        expect(result.lines).toHaveLength(2);
         expect(pickingRepository.lockPickListById).not.toHaveBeenCalled();
     });
 });
@@ -259,6 +373,19 @@ describe('completePickListAsync', () => {
         pickingRepository.lockPickListDetails.mockResolvedValue([detail()]);
         await expect(service.completePickListAsync(100, USER)).rejects.toMatchObject({ code: 'PICKING_INCOMPLETE' });
         expect(dcService.generateDCFromPickList).not.toHaveBeenCalled();
+    });
+
+    test('completes with full box excess: picked 25 for required 20 is valid, totals report the excess', async () => {
+        pickingRepository.lockPickListDetails.mockResolvedValue([detail({ RequestedQty: 20, PickedQty: 25, RemainingQty: 0, Status: 'PICKED' })]);
+        pickingRepository.getPickTransactions.mockResolvedValue([{ PickListDetailID: 1001, PickQty: 25 }]);
+        dcService.generateDCFromPickList.mockResolvedValue({ dcId: 1, dcNumber: 'DC000123', totalQty: 25, created: true });
+
+        const result = await service.completePickListAsync(100, USER);
+
+        expect(result).toMatchObject({ requiredQty: 20, pickedQty: 25, excessQty: 5, dcQty: 25 });
+        expect(pickingRepository.insertProcessLog).toHaveBeenCalledWith(expect.objectContaining({
+            stage: 'VALIDATION', result: 'SUCCESS', message: expect.stringContaining('excess 5')
+        }));
     });
 
     test('rejects when pick transactions do not add up to the picked quantity', async () => {

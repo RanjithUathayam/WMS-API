@@ -17,6 +17,12 @@ const ERROR_STATUS = {
     BOX_NOT_APPLICABLE: 409,
     ITEM_NOT_FOUND: 404,
     BOX_ALREADY_PICKED: 409,
+    BOX_HAS_UNLISTED_ITEMS: 409,
+    BOX_PARTIALLY_ALLOCATED: 409,
+    BOX_QTY_CHANGED: 409,
+    ITEM_NOT_IN_BOX: 409,
+    PARTIAL_BOX_NOT_ALLOWED: 400,
+    PICK_UPDATE_FAILED: 500,
     INSUFFICIENT_INVENTORY: 409,
     INSUFFICIENT_STOCK: 409,
     DOCUMENT_NOT_FOUND: 404,
@@ -92,8 +98,11 @@ const scanBox = handle(req => hasPickList(req.body)
     ? inventoryService.scanBoxForPickListAsync(req.body)
     : service.scanBoxAsync(req.body), 'Box validated');
 
+/** Full Box Picking: the whole box is picked; the message carries the excess warning when there is one. */
 const savePick = handle(req => service.savePickTransactionAsync(req.body, req.user),
-    data => (data.duplicate ? 'Pick transaction already saved' : 'Pick transaction saved successfully'), 201);
+    data => (data.duplicate
+        ? 'Pick transaction already saved'
+        : `Full box ${data.boxNumber} picked (${data.boxQty})` + (data.warning ? ` — ${data.warning}` : '')), 201);
 
 const completePickList = handle(req => service.completePickListAsync(req.params.pickListId, req.user),
     data => (data.alreadyCompleted ? `Pick List ${data.pickListNumber} was already completed` : `Pick List ${data.pickListNumber} completed successfully`));

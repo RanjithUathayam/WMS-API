@@ -61,6 +61,34 @@ describe('buildStockTransferPayload', () => {
         ]);
     });
 
+    test('full box excess, base-linked: required qty on the STR line, excess as an unlinked line — total = picked', () => {
+        const details = [
+            { PickListDetailID: 1, SourceDocEntry: 1001, SourceDocNum: 50001, SourceLineNum: 0, ItemCode: 'FG0001', RequestedQty: 10, PickedQty: 25, FromWarehouse: 'INTRTHDL', ToWarehouse: 'INTRATTM' },
+            { PickListDetailID: 2, SourceDocEntry: 1001, SourceDocNum: 50001, SourceLineNum: 1, ItemCode: 'FG0002', RequestedQty: 5, PickedQty: 5, FromWarehouse: 'INTRTHDL', ToWarehouse: 'INTRATTM' }
+        ];
+        const payload = sap.buildStockTransferPayload(HEADER, details, { linkBaseDocument: true, baseType: 'InventoryTransferRequest' });
+        expect(payload.StockTransferLines).toEqual([
+            { ItemCode: 'FG0001', Quantity: 10, FromWarehouseCode: 'INTRTHDL', WarehouseCode: 'INTRATTM', BaseType: 'InventoryTransferRequest', BaseEntry: 1001, BaseLine: 0 },
+            { ItemCode: 'FG0001', Quantity: 15, FromWarehouseCode: 'INTRTHDL', WarehouseCode: 'INTRATTM' },
+            { ItemCode: 'FG0002', Quantity: 5, FromWarehouseCode: 'INTRTHDL', WarehouseCode: 'INTRATTM', BaseType: 'InventoryTransferRequest', BaseEntry: 1001, BaseLine: 1 }
+        ]);
+        expect(payload.StockTransferLines.reduce((s, l) => s + l.Quantity, 0)).toBe(30);
+    });
+
+    test('full box excess with excessOnBaseLine: the whole picked qty stays on the linked line', () => {
+        const details = [{ PickListDetailID: 1, SourceDocEntry: 1001, SourceDocNum: 50001, SourceLineNum: 0, ItemCode: 'FG0001', RequestedQty: 10, PickedQty: 25, FromWarehouse: 'INTRTHDL', ToWarehouse: 'INTRATTM' }];
+        const payload = sap.buildStockTransferPayload(HEADER, details, { linkBaseDocument: true, baseType: 'InventoryTransferRequest', excessOnBaseLine: true });
+        expect(payload.StockTransferLines).toEqual([
+            { ItemCode: 'FG0001', Quantity: 25, FromWarehouseCode: 'INTRTHDL', WarehouseCode: 'INTRATTM', BaseType: 'InventoryTransferRequest', BaseEntry: 1001, BaseLine: 0 }
+        ]);
+    });
+
+    test('full box excess, unlinked: the picked qty (25), not the required qty (10), is transferred', () => {
+        const details = [{ PickListDetailID: 1, SourceDocEntry: 1001, SourceDocNum: 50001, SourceLineNum: 0, ItemCode: 'FG0001', RequestedQty: 10, PickedQty: 25, FromWarehouse: 'INTRTHDL', ToWarehouse: 'INTRATTM' }];
+        const payload = sap.buildStockTransferPayload(HEADER, details, { linkBaseDocument: false });
+        expect(payload.StockTransferLines).toEqual([{ ItemCode: 'FG0001', Quantity: 25, FromWarehouseCode: 'INTRTHDL', WarehouseCode: 'INTRATTM' }]);
+    });
+
     test('unlinked: compatible lines are combined per item', () => {
         const payload = sap.buildStockTransferPayload(HEADER, DETAILS, { linkBaseDocument: false });
         expect(payload.StockTransferLines).toEqual([

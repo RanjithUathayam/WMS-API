@@ -2,7 +2,7 @@ const https = require('https');
 const axios = require('axios');
 const { sequelize } = require('../config/database');
 const pickingRepository = require('../repository/pickingRepository');
-const { PickingError, sumQty } = require('./pickingCommon');
+const { PickingError, sumQty, subtractQty, toQty } = require('./pickingCommon');
 
 /**
  * SAP Business One Service Layer — Stock Transfer posting for completed Pick Lists.
@@ -19,6 +19,10 @@ const { PickingError, sumQty } = require('./pickingCommon');
  *                                  BaseType/BaseEntry/BaseLine so SAP closes the request lines;
  *                                  'false' combines quantities per item into one line.
  *   SAP_B1_BASE_TYPE               BaseType value for STR-linked lines (default 'InventoryTransferRequest')
+ *   SAP_B1_EXCESS_ON_BASE_LINE     Full Box Picking excess (picked > required) with base linking:
+ *                                  'false' (default) posts the excess as a separate, unlinked line so the
+ *                                  STR line is closed with exactly its required qty; 'true' puts the whole
+ *                                  picked qty on the linked line (only if SAP accepts over-delivery).
  *
  * Duplicate prevention: every transfer is posted with Reference2 = PickListNumber, and SAP is searched
  * for that reference before each POST — so a retry after a timeout / lost response / failed DB update
@@ -52,7 +56,8 @@ function readConfig() {
         rejectUnauthorized: String(process.env.SAP_B1_TLS_REJECT_UNAUTHORIZED || 'true').toLowerCase() !== 'false',
         timeoutMs: Number(process.env.SAP_B1_TIMEOUT_MS) > 0 ? Number(process.env.SAP_B1_TIMEOUT_MS) : 60000,
         linkBaseDocument: String(process.env.SAP_B1_LINK_BASE_DOCUMENT || 'true').toLowerCase() !== 'false',
-        baseType: (process.env.SAP_B1_BASE_TYPE || 'InventoryTransferRequest').trim()
+        baseType: (process.env.SAP_B1_BASE_TYPE || 'InventoryTransferRequest').trim(),
+        excessOnBaseLine: String(process.env.SAP_B1_EXCESS_ON_BASE_LINE || 'false').toLowerCase() === 'true'
     };
 }
 
@@ -156,10 +161,13 @@ function truncate(value, max) {
 
 /**
  * Builds the StockTransfers payload purely from the completed Pick List (header + details).
+ * The transferred quantity is always the ACTUAL picked quantity (Full Box Picking: required 10, box 25
+ * -> 25 is transferred), so SAP stock moves exactly what physically left the warehouse.
  * With base-document linking each source STR line becomes its own transfer line (traceable and closed
- * in SAP); without it, compatible lines (same item + warehouses) are combined.
+ * in SAP) carrying at most its required qty; any full-box excess follows as an unlinked line of the same
+ * item (unless excessOnBaseLine). Without linking, compatible lines (same item + warehouses) are combined.
  */
-function buildStockTransferPayload(header, details, { linkBaseDocument, baseType }) {
+function buildStockTransferPayload(header, details, { linkBaseDocument, baseType, excessOnBaseLine = false }) {
     if (!header.CompletedDateText) {
         throw new SapServiceError('SAP_PAYLOAD_INVALID', `Pick List ${header.PickListNumber} has no completion date.`);
     }
@@ -170,15 +178,27 @@ function buildStockTransferPayload(header, details, { linkBaseDocument, baseType
 
     let lines;
     if (linkBaseDocument) {
-        lines = picked.map(d => ({
-            ItemCode: d.ItemCode,
-            Quantity: Number(d.PickedQty),
-            FromWarehouseCode: d.FromWarehouse,
-            WarehouseCode: d.ToWarehouse,
-            BaseType: baseType,
-            BaseEntry: d.SourceDocEntry,
-            BaseLine: d.SourceLineNum
-        }));
+        lines = [];
+        for (const d of picked) {
+            const pickedQty = toQty(d.PickedQty);
+            const requiredQty = d.RequestedQty !== undefined && d.RequestedQty !== null ? toQty(d.RequestedQty) : pickedQty;
+            const linkedQty = excessOnBaseLine ? pickedQty : Math.min(pickedQty, requiredQty);
+            const excessQty = subtractQty(pickedQty, linkedQty);
+            if (linkedQty > 0) {
+                lines.push({
+                    ItemCode: d.ItemCode,
+                    Quantity: linkedQty,
+                    FromWarehouseCode: d.FromWarehouse,
+                    WarehouseCode: d.ToWarehouse,
+                    BaseType: baseType,
+                    BaseEntry: d.SourceDocEntry,
+                    BaseLine: d.SourceLineNum
+                });
+            }
+            if (excessQty > 0) {
+                lines.push({ ItemCode: d.ItemCode, Quantity: excessQty, FromWarehouseCode: d.FromWarehouse, WarehouseCode: d.ToWarehouse });
+            }
+        }
     } else {
         const grouped = new Map();
         for (const d of picked) {

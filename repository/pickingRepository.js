@@ -162,7 +162,7 @@ const HEADER_COLUMNS = `
 
 const DETAIL_COLUMNS = `
     PickListDetailID, PickListID, SourceDocEntry, SourceDocNum, SourceLineNum, SourceDocDate, SourceDocDueDate,
-    ItemCode, ItemName, SourceOpenQty, RequestedQty, PickedQty, RemainingQty, FromWarehouse, ToWarehouse, Status`;
+    ItemCode, ItemName, SourceOpenQty, RequestedQty, PlannedQty, PickedQty, RemainingQty, FromWarehouse, ToWarehouse, Status`;
 
 async function insertPickListHeader(transaction, { fromWarehouse, toWarehouse, totalRequestedQty, createdBy }) {
     const rows = await sequelize.query(`
@@ -180,24 +180,26 @@ async function insertPickListHeader(transaction, { fromWarehouse, toWarehouse, t
 
 async function insertPickListDetail(transaction, {
     pickListId, sourceDocEntry, sourceDocNum, sourceLineNum, sourceDocDate, sourceDocDueDate,
-    itemCode, itemName, sourceOpenQty, requestedQty, fromWarehouse, toWarehouse
+    itemCode, itemName, sourceOpenQty, requestedQty, plannedQty, fromWarehouse, toWarehouse
 }) {
     const rows = await sequelize.query(`
         INSERT INTO T_PICK_LIST_DETAIL
             (PickListID, SourceDocEntry, SourceDocNum, SourceLineNum, SourceDocDate, SourceDocDueDate,
-             ItemCode, ItemName, SourceOpenQty, RequestedQty, PickedQty, RemainingQty, FromWarehouse, ToWarehouse, Status)
+             ItemCode, ItemName, SourceOpenQty, RequestedQty, PlannedQty, PickedQty, RemainingQty, FromWarehouse, ToWarehouse, Status)
         OUTPUT INSERTED.PickListDetailID, INSERTED.PickListID, INSERTED.SourceDocEntry, INSERTED.SourceDocNum,
                INSERTED.SourceLineNum, INSERTED.ItemCode, INSERTED.ItemName, INSERTED.SourceOpenQty,
-               INSERTED.RequestedQty, INSERTED.PickedQty, INSERTED.RemainingQty,
+               INSERTED.RequestedQty, INSERTED.PlannedQty, INSERTED.PickedQty, INSERTED.RemainingQty,
                INSERTED.FromWarehouse, INSERTED.ToWarehouse, INSERTED.Status
         VALUES
             (:pickListId, :sourceDocEntry, :sourceDocNum, :sourceLineNum, :sourceDocDate, :sourceDocDueDate,
-             :itemCode, :itemName, :sourceOpenQty, :requestedQty, 0, :requestedQty, :fromWarehouse, :toWarehouse, 'OPEN')
+             :itemCode, :itemName, :sourceOpenQty, :requestedQty, :plannedQty, 0, :requestedQty, :fromWarehouse, :toWarehouse, 'OPEN')
     `, {
         replacements: {
             pickListId, sourceDocEntry, sourceDocNum, sourceLineNum,
             sourceDocDate: sourceDocDate || null, sourceDocDueDate: sourceDocDueDate || null,
-            itemCode, itemName: itemName || null, sourceOpenQty, requestedQty, fromWarehouse, toWarehouse
+            itemCode, itemName: itemName || null, sourceOpenQty, requestedQty,
+            plannedQty: plannedQty === undefined || plannedQty === null ? requestedQty : plannedQty,
+            fromWarehouse, toWarehouse
         },
         transaction,
         type: QueryTypes.SELECT
@@ -302,6 +304,28 @@ async function applyPickToDetail(transaction, pickListDetailId, pickQty) {
     return rows[0] || null;
 }
 
+/**
+ * Full Box Picking: adds a whole box quantity to an already-locked detail. PickedQty may exceed
+ * RequestedQty (the excess of a full box); RemainingQty never goes below 0. Matches
+ * CK_PICK_LIST_DETAIL_QTY_FULLBOX (sql/PickList_FullBox_Migration.sql). Right-hand side values are the
+ * pre-update row, so every expression sees the same PickedQty.
+ */
+async function applyFullBoxPickToDetail(transaction, pickListDetailId, pickQty) {
+    const rows = await sequelize.query(`
+        UPDATE T_PICK_LIST_DETAIL
+        SET PickedQty = PickedQty + :pickQty,
+            RemainingQty = CASE WHEN RequestedQty - (PickedQty + :pickQty) > 0 THEN RequestedQty - (PickedQty + :pickQty) ELSE 0 END,
+            Status = CASE WHEN RequestedQty - (PickedQty + :pickQty) > 0 THEN 'PARTIAL' ELSE 'PICKED' END
+        OUTPUT INSERTED.PickListDetailID, INSERTED.RequestedQty, INSERTED.PickedQty, INSERTED.RemainingQty, INSERTED.Status
+        WHERE PickListDetailID = :pickListDetailId AND :pickQty > 0
+    `, {
+        replacements: { pickListDetailId, pickQty },
+        transaction,
+        type: QueryTypes.SELECT
+    });
+    return rows[0] || null;
+}
+
 /** Recomputes header totals from the details and rolls Status OPEN/IN_PROGRESS -> IN_PROGRESS/PICKED. Never touches a header already past PICKED. */
 async function refreshPickListProgress(transaction, pickListId, updatedBy) {
     const rows = await sequelize.query(`
@@ -332,15 +356,15 @@ async function insertPickTransaction(transaction, t) {
             INSERT INTO T_PICK_TRANSACTION
                 (PickListID, PickListDetailID, SourceDocEntry, SourceDocNum, SourceLineNum, ItemCode, Warehouse,
                  LocationID, Location, InventoryID, PalletMappingID, PalletNumber, BoxID, BoxNumber,
-                 AvailableQty, PickQty, PickingHistoryID, ClientRequestId, CreatedBy, CreatedDate)
+                 AvailableQty, PickQty, IsFullBox, PickingHistoryID, ClientRequestId, CreatedBy, CreatedDate)
             OUTPUT INSERTED.PickTransactionID, INSERTED.PickListID, INSERTED.PickListDetailID, INSERTED.SourceDocEntry,
                    INSERTED.SourceDocNum, INSERTED.SourceLineNum, INSERTED.ItemCode, INSERTED.Warehouse, INSERTED.Location,
                    INSERTED.PalletMappingID, INSERTED.PalletNumber, INSERTED.BoxID, INSERTED.BoxNumber,
-                   INSERTED.AvailableQty, INSERTED.PickQty, INSERTED.CreatedBy, INSERTED.CreatedDate
+                   INSERTED.AvailableQty, INSERTED.PickQty, INSERTED.IsFullBox, INSERTED.CreatedBy, INSERTED.CreatedDate
             VALUES
                 (:pickListId, :pickListDetailId, :sourceDocEntry, :sourceDocNum, :sourceLineNum, :itemCode, :warehouse,
                  :locationId, :location, :inventoryId, :palletMappingId, :palletNumber, :boxId, :boxNumber,
-                 :availableQty, :pickQty, :pickingHistoryId, :clientRequestId, :createdBy, GETDATE())
+                 :availableQty, :pickQty, :isFullBox, :pickingHistoryId, :clientRequestId, :createdBy, GETDATE())
         `, {
             replacements: {
                 pickListId: t.pickListId, pickListDetailId: t.pickListDetailId,
@@ -348,6 +372,7 @@ async function insertPickTransaction(transaction, t) {
                 itemCode: t.itemCode, warehouse: t.warehouse, locationId: t.locationId || null, location: t.location || null,
                 inventoryId: t.inventoryId, palletMappingId: t.palletMappingId, palletNumber: t.palletNumber,
                 boxId: t.boxId || null, boxNumber: t.boxNumber, availableQty: t.availableQty, pickQty: t.pickQty,
+                isFullBox: t.isFullBox ? 1 : 0,
                 pickingHistoryId: t.pickingHistoryId || null, clientRequestId: t.clientRequestId || null, createdBy: t.createdBy
             },
             transaction,
@@ -364,25 +389,34 @@ async function insertPickTransaction(transaction, t) {
     }
 }
 
-async function findPickTransactionByClientRequestId(pickListId, clientRequestId, transaction) {
-    const rows = await sequelize.query(`
-        SELECT t.PickTransactionID, t.PickListID, t.PickListDetailID, t.ItemCode, t.PickQty, d.RemainingQty
+/**
+ * Every row saved under a clientRequestId. A full box writes one row per item / source line: the first
+ * carries the id itself, the others `<id>#2`, `<id>#3`… (UX_PICK_TRANSACTION_CLIENTREQ stays unique).
+ */
+async function findPickTransactionsByClientRequestId(pickListId, clientRequestId, transaction) {
+    return sequelize.query(`
+        SELECT t.PickTransactionID, t.PickListID, t.PickListDetailID, t.ItemCode, t.PalletNumber, t.BoxNumber,
+               t.AvailableQty, t.PickQty, t.IsFullBox, d.RequestedQty, d.PickedQty, d.RemainingQty
         FROM T_PICK_TRANSACTION t WITH (NOLOCK)
         INNER JOIN T_PICK_LIST_DETAIL d WITH (NOLOCK) ON d.PickListDetailID = t.PickListDetailID
-        WHERE t.PickListID = :pickListId AND t.ClientRequestId = :clientRequestId
+        WHERE t.PickListID = :pickListId
+          AND (t.ClientRequestId = :clientRequestId OR t.ClientRequestId LIKE :clientRequestPattern)
+        ORDER BY t.PickTransactionID
     `, {
-        replacements: { pickListId, clientRequestId },
+        replacements: {
+            pickListId, clientRequestId,
+            clientRequestPattern: `${String(clientRequestId).replace(/[\[%_]/g, '[$&]')}#%`
+        },
         transaction,
         type: QueryTypes.SELECT
     });
-    return rows[0] || null;
 }
 
 async function getPickTransactions(pickListId, transaction) {
     return sequelize.query(`
         SELECT PickTransactionID, PickListID, PickListDetailID, SourceDocEntry, SourceDocNum, SourceLineNum,
                ItemCode, Warehouse, LocationID, Location, InventoryID, PalletMappingID, PalletNumber, BoxID, BoxNumber,
-               AvailableQty, PickQty, PickingHistoryID, CreatedBy, CreatedDate
+               AvailableQty, PickQty, IsFullBox, PickingHistoryID, CreatedBy, CreatedDate
         FROM T_PICK_TRANSACTION WITH (NOLOCK)
         WHERE PickListID = :pickListId
         ORDER BY PickTransactionID
@@ -523,9 +557,10 @@ module.exports = {
     lockPickListDetails,
     lockPickListDetail,
     applyPickToDetail,
+    applyFullBoxPickToDetail,
     refreshPickListProgress,
     insertPickTransaction,
-    findPickTransactionByClientRequestId,
+    findPickTransactionsByClientRequestId,
     getPickTransactions,
     beginCompletion,
     releaseProcessingLease,
