@@ -6,6 +6,8 @@ router.get('/prebinning', reportController.getPreBinningReport);
 router.get('/palletmapping', reportController.getPalletMappingReport);
 router.get('/locationmapping', reportController.getLocationMappingReport);
 router.get('/inventorydetails', reportController.getInventoryDetailsReport);
+router.get('/warehousestock', reportController.getWarehouseStockReport);
+router.get('/warehousestockdetails', reportController.getWarehouseStockDetailsReport);
 router.get('/picking', reportController.getPickingHistoryReport);
 
 module.exports = router;

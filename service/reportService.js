@@ -373,6 +373,157 @@ async function getInventoryDetailsReportExportAsync(query) {
 }
 
 // ---------------------------------------------------------------------------
+// Warehouse Stock Report (warehouse-wise, item-wise) + drill-down details
+// ---------------------------------------------------------------------------
+const STOCK_TOTALS_KEYS = { Quantity: 'quantity', AllocatedQty: 'allocatedQty', AvailableQty: 'availableQty' };
+const STOCK_SUMMARY_TOTALS_KEYS = {
+    ...STOCK_TOTALS_KEYS, PreBinnedQty: 'preBinnedQty', PalletMappedQty: 'palletMappedQty', InLocationQty: 'inLocationQty'
+};
+const STOCK_STAGES = ['PRE-BINNED', 'PALLET MAPPED', 'IN LOCATION'];
+
+function toNumberOrNull(value) {
+    return value !== null && value !== undefined ? Number(value) : null;
+}
+
+/** Only the three known stages are accepted — anything else is ignored (treated as "All"). */
+function toStockStage(value) {
+    const stage = trimOrUndefined(value);
+    return stage && STOCK_STAGES.includes(stage.toUpperCase()) ? stage.toUpperCase() : undefined;
+}
+
+const WAREHOUSESTOCK_SORT_COLUMNS = {
+    warehouseCode: 'WarehouseCode', itemCode: 'ItemCode', 'itemMaster.itemName': 'MasterItemName',
+    quantity: 'Quantity', allocatedQty: 'AllocatedQty', availableQty: 'AvailableQty',
+    preBinnedQty: 'PreBinnedQty', palletMappedQty: 'PalletMappedQty', inLocationQty: 'InLocationQty',
+    locationCount: 'LocationCount', palletCount: 'PalletCount', boxCount: 'BoxCount'
+};
+const WAREHOUSESTOCK_DEFAULT_ORDER = 'WarehouseCode ASC, ItemCode ASC';
+const WAREHOUSESTOCK_EXPORT_COLUMNS = [
+    { header: 'Warehouse', data: 'WarehouseCode' }, { header: 'Item Code', data: 'ItemCode' },
+    { header: 'Item Name', data: 'MasterItemName' }, { header: 'Item Group', data: 'InventoryItemGroup' },
+    { header: 'Category', data: 'Category' }, { header: 'Color', data: 'Color' }, { header: 'Size', data: 'Size' },
+    { header: 'Style', data: 'Style' }, { header: 'Total Stock Qty', data: 'Quantity' },
+    { header: 'Boxes', data: 'BoxCount' }, { header: 'Pallets', data: 'PalletCount' },
+    { header: 'Locations', data: 'LocationCount' }, { header: 'Pre-Binned Qty (No Pallet)', data: 'PreBinnedQty' },
+    { header: 'Pallet Mapped Qty (No Location)', data: 'PalletMappedQty' }, { header: 'In Location Qty', data: 'InLocationQty' },
+    { header: 'Allocated Qty', data: 'AllocatedQty' },
+    { header: 'Available Qty', data: 'AvailableQty' }
+];
+
+function toWarehouseStockFilters(query) {
+    return {
+        warehouseCode: trimOrUndefined(query.warehouseCode),
+        itemCode: trimOrUndefined(query.itemCode),
+        itemName: trimOrUndefined(query.itemName),
+        itemGroup: trimOrUndefined(query.itemGroup),
+        category: trimOrUndefined(query.category),
+        stage: toStockStage(query.stage),
+        search: trimOrUndefined(query.search)
+    };
+}
+
+function toWarehouseStockDto(row) {
+    return {
+        warehouseCode: row.WarehouseCode,
+        itemCode: row.ItemCode,
+        itemGroup: row.InventoryItemGroup || row.MasterItemGroup || null,
+        quantity: toNumberOrNull(row.Quantity),
+        allocatedQty: toNumberOrNull(row.AllocatedQty),
+        availableQty: toNumberOrNull(row.AvailableQty),
+        preBinnedQty: toNumberOrNull(row.PreBinnedQty),
+        palletMappedQty: toNumberOrNull(row.PalletMappedQty),
+        inLocationQty: toNumberOrNull(row.InLocationQty),
+        locationCount: Number(row.LocationCount) || 0,
+        palletCount: Number(row.PalletCount) || 0,
+        boxCount: Number(row.BoxCount) || 0,
+        itemMaster: buildItemMaster(row)
+    };
+}
+
+async function getWarehouseStockReportAsync(query) {
+    const filters = toWarehouseStockFilters(query);
+    const { page, pageSize, offset } = normalizePaging(query);
+    const orderBy = resolveSort(query, WAREHOUSESTOCK_SORT_COLUMNS, WAREHOUSESTOCK_DEFAULT_ORDER);
+
+    const { rows, totalRecords, totals } = await repository.getWarehouseStockReport(filters, { offset, pageSize, orderBy });
+    return {
+        data: rows.map(toWarehouseStockDto),
+        pagination: buildPagination(page, pageSize, totalRecords),
+        totals: toTotals(totals, STOCK_SUMMARY_TOTALS_KEYS)
+    };
+}
+
+async function getWarehouseStockReportExportAsync(query) {
+    const filters = toWarehouseStockFilters(query);
+    const orderBy = resolveSort(query, WAREHOUSESTOCK_SORT_COLUMNS, WAREHOUSESTOCK_DEFAULT_ORDER);
+    const rows = await repository.getWarehouseStockReportForExport(filters, { orderBy, maxRows: MAX_EXPORT_ROWS });
+    return { rows, columns: WAREHOUSESTOCK_EXPORT_COLUMNS };
+}
+
+const WAREHOUSESTOCKDETAILS_SORT_COLUMNS = {
+    stage: 'Stage', rowCode: 'RowCode', locationCode: 'LocationCode', palletId: 'PalletID', boxNumber: 'BoxNumber',
+    quantity: 'Quantity', allocatedQty: 'AllocatedQty', availableQty: 'AvailableQty', stockDate: 'StockDate'
+};
+const WAREHOUSESTOCKDETAILS_DEFAULT_ORDER = 'LocationCode ASC, PalletID ASC, BoxNumber ASC';
+const WAREHOUSESTOCKDETAILS_EXPORT_COLUMNS = [
+    { header: 'Warehouse', data: 'WarehouseCode' }, { header: 'Item Code', data: 'ItemCode' }, { header: 'Stage', data: 'Stage' },
+    { header: 'Row', data: 'RowCode' }, { header: 'Location', data: 'LocationCode' }, { header: 'Pallet ID', data: 'PalletID' },
+    { header: 'Box Number', data: 'BoxNumber' }, { header: 'Stock Qty', data: 'Quantity' }, { header: 'Allocated Qty', data: 'AllocatedQty' },
+    { header: 'Available Qty', data: 'AvailableQty' }, { header: 'Stock Date', data: 'StockDate' }
+];
+
+function toWarehouseStockDetailsFilters(query) {
+    const filters = {
+        warehouseCode: trimOrUndefined(query.warehouseCode),
+        itemCode: trimOrUndefined(query.itemCode),
+        stage: toStockStage(query.stage),
+        search: trimOrUndefined(query.search)
+    };
+    if (!filters.warehouseCode || !filters.itemCode) {
+        throw new ReportError('MISSING_PARAMETERS', 'warehouseCode and itemCode are required.');
+    }
+    return filters;
+}
+
+function toWarehouseStockDetailsDto(row) {
+    // Pallet / location are null for boxes not yet mapped that far — the UI shows them as "Not Mapped".
+    return {
+        warehouseCode: row.WarehouseCode,
+        itemCode: row.ItemCode,
+        stage: row.Stage,
+        rowCode: row.RowCode || null,
+        locationCode: row.LocationCode || null,
+        palletMappingId: row.PalletMappingID || null,
+        palletId: row.PalletID || null,
+        boxNumber: row.BoxNumber || null,
+        quantity: toNumberOrNull(row.Quantity),
+        allocatedQty: toNumberOrNull(row.AllocatedQty),
+        availableQty: toNumberOrNull(row.AvailableQty),
+        stockDate: row.StockDate || null
+    };
+}
+
+async function getWarehouseStockDetailsReportAsync(query) {
+    const filters = toWarehouseStockDetailsFilters(query);
+    const { page, pageSize, offset } = normalizePaging(query);
+    const orderBy = resolveSort(query, WAREHOUSESTOCKDETAILS_SORT_COLUMNS, WAREHOUSESTOCKDETAILS_DEFAULT_ORDER);
+
+    const { rows, totalRecords, totals } = await repository.getWarehouseStockDetailsReport(filters, { offset, pageSize, orderBy });
+    return {
+        data: rows.map(toWarehouseStockDetailsDto),
+        pagination: buildPagination(page, pageSize, totalRecords),
+        totals: toTotals(totals, STOCK_TOTALS_KEYS)
+    };
+}
+
+async function getWarehouseStockDetailsReportExportAsync(query) {
+    const filters = toWarehouseStockDetailsFilters(query);
+    const orderBy = resolveSort(query, WAREHOUSESTOCKDETAILS_SORT_COLUMNS, WAREHOUSESTOCKDETAILS_DEFAULT_ORDER);
+    const rows = await repository.getWarehouseStockDetailsReportForExport(filters, { orderBy, maxRows: MAX_EXPORT_ROWS });
+    return { rows, columns: WAREHOUSESTOCKDETAILS_EXPORT_COLUMNS };
+}
+
+// ---------------------------------------------------------------------------
 // Picking History Report
 // ---------------------------------------------------------------------------
 const PICKINGHISTORY_SORT_COLUMNS = {
@@ -454,6 +605,10 @@ module.exports = {
     getLocationMappingReportExportAsync,
     getInventoryDetailsReportAsync,
     getInventoryDetailsReportExportAsync,
+    getWarehouseStockReportAsync,
+    getWarehouseStockReportExportAsync,
+    getWarehouseStockDetailsReportAsync,
+    getWarehouseStockDetailsReportExportAsync,
     getPickingHistoryReportAsync,
     getPickingHistoryReportExportAsync
 };

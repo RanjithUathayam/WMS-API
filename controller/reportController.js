@@ -40,5 +40,7 @@ module.exports = {
     getPalletMappingReport: makeReportHandler('Pallet Mapping Report', service.getPalletMappingReportAsync, service.getPalletMappingReportExportAsync),
     getLocationMappingReport: makeReportHandler('Location Mapping Report', service.getLocationMappingReportAsync, service.getLocationMappingReportExportAsync),
     getInventoryDetailsReport: makeReportHandler('Inventory Details Report', service.getInventoryDetailsReportAsync, service.getInventoryDetailsReportExportAsync),
+    getWarehouseStockReport: makeReportHandler('Warehouse Stock Report', service.getWarehouseStockReportAsync, service.getWarehouseStockReportExportAsync),
+    getWarehouseStockDetailsReport: makeReportHandler('Warehouse Stock Details Report', service.getWarehouseStockDetailsReportAsync, service.getWarehouseStockDetailsReportExportAsync),
     getPickingHistoryReport: makeReportHandler('Picking History Report', service.getPickingHistoryReportAsync, service.getPickingHistoryReportExportAsync)
 };

@@ -285,6 +285,136 @@ async function getInventoryDetailsReportForExport(filters, { orderBy, maxRows })
 }
 
 // ---------------------------------------------------------------------------
+// Warehouse Stock Report — warehouse-wise, item-wise stock, plus a drill-down
+// listing the box / pallet / location lines behind one warehouse + item.
+//
+// One stock line per (box, item), built from two sources (UNION ALL):
+//   A) Boxes that have reached T_INVENTORY (location mapping done) — the
+//      AVAILABLE, Quantity > 0 inventory rows, which already reflect picking.
+//   B) Pre-binning COMPLETED boxes that have NOT reached T_INVENTORY yet —
+//      quantities from T_PREBIN_ITEM; pallet (T_PALLET_MAPPING_BOX) and
+//      location (T_LOCATION currently holding that pallet) shown when present,
+//      NULL otherwise. A box is in exactly one source (NOT EXISTS on BoxNumber).
+// Stage tells where the line is: PRE-BINNED / PALLET MAPPED / IN LOCATION.
+// Master_Part is a plain LEFT JOIN: ItemCode is its primary key, so it can't
+// multiply lines. (Don't switch to a per-row OUTER APPLY — Master_Part.ItemCode
+// is VARCHAR vs NVARCHAR here, and the per-row lookup timed out at 40s.)
+// ---------------------------------------------------------------------------
+const STOCK_LINES_SOURCE = `
+    (
+        SELECT inv.WarehouseCode, inv.ItemCode, inv.ItemGroup, inv.BoxNumber, inv.PalletID, inv.PalletMappingID,
+               inv.LocationCode, inv.RowCode, CAST(inv.Quantity AS DECIMAL(18, 3)) AS Quantity,
+               CAST(ISNULL(inv.AllocatedQty, 0) AS DECIMAL(18, 3)) AS AllocatedQty,
+               CAST('IN LOCATION' AS NVARCHAR(20)) AS Stage, inv.CreatedAt AS StockDate
+        FROM T_INVENTORY inv WITH (NOLOCK)
+        WHERE inv.Status = 'AVAILABLE' AND inv.Quantity > 0
+
+        UNION ALL
+
+        SELECT pb.WarehouseCode, pi.ItemCode, MAX(pi.ItemGroup) AS ItemGroup, pb.BoxNumber, pmb.PalletID, pmb.PalletMappingID,
+               loc.LocationCode, loc.RowCode, CAST(SUM(pi.Qty) AS DECIMAL(18, 3)) AS Quantity, CAST(0 AS DECIMAL(18, 3)) AS AllocatedQty,
+               CAST(CASE WHEN loc.LocationID IS NOT NULL THEN 'IN LOCATION'
+                         WHEN pmb.PalletMappingBoxID IS NOT NULL THEN 'PALLET MAPPED'
+                         ELSE 'PRE-BINNED' END AS NVARCHAR(20)) AS Stage,
+               pb.CompletedAt AS StockDate
+        FROM T_PREBIN_BOX pb WITH (NOLOCK)
+        INNER JOIN T_PREBIN_ITEM pi WITH (NOLOCK) ON pi.PreBinBoxID = pb.PreBinBoxID
+        LEFT JOIN T_PALLET_MAPPING_BOX pmb WITH (NOLOCK) ON pmb.BoxNumber = pb.BoxNumber
+        LEFT JOIN T_LOCATION loc WITH (NOLOCK) ON pmb.PalletMappingID IS NOT NULL AND loc.CurrentPalletMappingID = pmb.PalletMappingID
+        WHERE pb.Status = 'COMPLETED'
+          AND NOT EXISTS (SELECT 1 FROM T_INVENTORY i WITH (NOLOCK) WHERE i.BoxNumber = pb.BoxNumber)
+        GROUP BY pb.WarehouseCode, pi.ItemCode, pb.BoxNumber, pmb.PalletID, pmb.PalletMappingID, pmb.PalletMappingBoxID,
+                 loc.LocationID, loc.LocationCode, loc.RowCode, pb.CompletedAt
+        HAVING SUM(pi.Qty) > 0
+    ) s`;
+const STOCK_MASTER_PART_JOIN = MASTER_PART_JOIN.replace('%ALIAS%', 's');
+const STOCK_SUM_SELECT = 'SUM(s.Quantity) AS Quantity, SUM(s.AllocatedQty) AS AllocatedQty, SUM(s.Quantity) - SUM(s.AllocatedQty) AS AvailableQty';
+const STOCK_STAGE_SUM_SELECT = `
+    SUM(CASE WHEN s.Stage = 'PRE-BINNED' THEN s.Quantity ELSE 0 END) AS PreBinnedQty,
+    SUM(CASE WHEN s.Stage = 'PALLET MAPPED' THEN s.Quantity ELSE 0 END) AS PalletMappedQty,
+    SUM(CASE WHEN s.Stage = 'IN LOCATION' THEN s.Quantity ELSE 0 END) AS InLocationQty`;
+
+function buildWarehouseStockQuery(filters) {
+    const conditions = [];
+    const replacements = {};
+
+    if (filters.warehouseCode) { conditions.push('s.WarehouseCode = :warehouseCode'); replacements.warehouseCode = filters.warehouseCode; }
+    if (filters.itemCode) { conditions.push('s.ItemCode LIKE :itemCode'); replacements.itemCode = `%${filters.itemCode}%`; }
+    if (filters.itemName) { conditions.push('mp.ItemName LIKE :itemName'); replacements.itemName = `%${filters.itemName}%`; }
+    if (filters.itemGroup) { conditions.push('(s.ItemGroup LIKE :itemGroup OR mp.ItemGroup LIKE :itemGroup)'); replacements.itemGroup = `%${filters.itemGroup}%`; }
+    if (filters.category) { conditions.push('mp.Category LIKE :category'); replacements.category = `%${filters.category}%`; }
+    if (filters.stage) { conditions.push('s.Stage = :stage'); replacements.stage = filters.stage; }
+    if (filters.search) {
+        conditions.push(`(s.WarehouseCode LIKE :search OR s.ItemCode LIKE :search OR s.ItemGroup LIKE :search OR ${MASTER_PART_SEARCH})`);
+        replacements.search = `%${filters.search}%`;
+    }
+
+    return {
+        selectColumns: `
+            s.WarehouseCode AS WarehouseCode, s.ItemCode AS ItemCode, MAX(s.ItemGroup) AS InventoryItemGroup,
+            ${STOCK_SUM_SELECT}, ${STOCK_STAGE_SUM_SELECT},
+            COUNT(DISTINCT s.LocationCode) AS LocationCount, COUNT(DISTINCT s.PalletID) AS PalletCount,
+            COUNT(DISTINCT s.BoxNumber) AS BoxCount,
+            MAX(mp.ItemCode) AS MasterItemCode, MAX(mp.ItemName) AS MasterItemName, MAX(mp.ItemGroup) AS MasterItemGroup,
+            MAX(mp.Category) AS Category, MAX(mp.Description) AS Description, MAX(mp.Color) AS Color,
+            MAX(mp.Size) AS Size, MAX(mp.Style) AS Style, MAX(mp.BinCapacity) AS BinCapacity
+        `,
+        fromJoin: `${STOCK_LINES_SOURCE} ${STOCK_MASTER_PART_JOIN}`,
+        whereSql: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
+        groupBy: 's.WarehouseCode, s.ItemCode',
+        sumSelect: `${STOCK_SUM_SELECT}, ${STOCK_STAGE_SUM_SELECT}`,
+        replacements
+    };
+}
+
+async function getWarehouseStockReport(filters, { offset, pageSize, orderBy }) {
+    const q = buildWarehouseStockQuery(filters);
+    return runPagedQuery({ ...q, orderBy, offset, pageSize });
+}
+
+async function getWarehouseStockReportForExport(filters, { orderBy, maxRows }) {
+    const q = buildWarehouseStockQuery(filters);
+    return runFullQuery({ ...q, orderBy, maxRows });
+}
+
+function buildWarehouseStockDetailsQuery(filters) {
+    // warehouseCode + itemCode are required (validated in the service) and matched exactly —
+    // this is the drill-down for one row of the grouped report above.
+    const conditions = ['s.WarehouseCode = :warehouseCode', 's.ItemCode = :itemCode'];
+    const replacements = { warehouseCode: filters.warehouseCode, itemCode: filters.itemCode };
+
+    if (filters.stage) { conditions.push('s.Stage = :stage'); replacements.stage = filters.stage; }
+    if (filters.search) {
+        conditions.push('(s.RowCode LIKE :search OR s.LocationCode LIKE :search OR s.PalletID LIKE :search OR s.BoxNumber LIKE :search OR s.Stage LIKE :search)');
+        replacements.search = `%${filters.search}%`;
+    }
+
+    return {
+        selectColumns: `
+            s.WarehouseCode AS WarehouseCode, s.ItemCode AS ItemCode, s.Stage AS Stage, s.RowCode AS RowCode,
+            s.LocationCode AS LocationCode, s.PalletMappingID AS PalletMappingID, s.PalletID AS PalletID,
+            s.BoxNumber AS BoxNumber, s.Quantity AS Quantity, s.AllocatedQty AS AllocatedQty,
+            s.Quantity - s.AllocatedQty AS AvailableQty, s.StockDate AS StockDate
+        `,
+        fromJoin: STOCK_LINES_SOURCE,
+        whereSql: `WHERE ${conditions.join(' AND ')}`,
+        groupBy: null,
+        sumSelect: STOCK_SUM_SELECT,
+        replacements
+    };
+}
+
+async function getWarehouseStockDetailsReport(filters, { offset, pageSize, orderBy }) {
+    const q = buildWarehouseStockDetailsQuery(filters);
+    return runPagedQuery({ ...q, orderBy, offset, pageSize });
+}
+
+async function getWarehouseStockDetailsReportForExport(filters, { orderBy, maxRows }) {
+    const q = buildWarehouseStockDetailsQuery(filters);
+    return runFullQuery({ ...q, orderBy, maxRows });
+}
+
+// ---------------------------------------------------------------------------
 // Picking History Report — T_PICKING_HISTORY (one row per completed picking
 // transaction) left-joined to Master_Part for item name.
 // ---------------------------------------------------------------------------
@@ -344,6 +474,10 @@ module.exports = {
     getLocationMappingReportForExport,
     getInventoryDetailsReport,
     getInventoryDetailsReportForExport,
+    getWarehouseStockReport,
+    getWarehouseStockReportForExport,
+    getWarehouseStockDetailsReport,
+    getWarehouseStockDetailsReportForExport,
     getPickingHistoryReport,
     getPickingHistoryReportForExport
 };

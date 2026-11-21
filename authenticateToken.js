@@ -146,6 +146,10 @@ const authenticateToken = async (req, res, next) => {
     { endpoint: '/palletmapping',pattern:'report_palletMapping_list', moduleName: 'Pallet Mapping Report', type:'List' },
     { endpoint: '/locationmapping',pattern:'report_locationMapping_list', moduleName: 'Location Mapping Report', type:'List' },
     { endpoint: '/inventorydetails',pattern:'report_inventory_list', moduleName: 'Inventory Details Report', type:'List' },
+    // Warehouse Stock Report (warehouse-wise / item-wise) + its location/pallet/box drill-down —
+    // same stock data as the Inventory Details Report, so it shares that report's permission.
+    { endpoint: '/warehousestock',pattern:'report_inventory_list', moduleName: 'Warehouse Stock Report', type:'List' },
+    { endpoint: '/warehousestockdetails',pattern:'report_inventory_list', moduleName: 'Warehouse Stock Details Report', type:'List' },
     { endpoint: '/picking',pattern:'report_picking_list', moduleName: 'Picking History Report', type:'List' },
 
     // Label Print Configuration & Printing (routes/labelPrintRoutes.js, mounted at /api/label-print).
