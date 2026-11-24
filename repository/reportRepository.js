@@ -112,7 +112,26 @@ async function getPreBinningReportForExport(filters, { orderBy, maxRows }) {
 // ---------------------------------------------------------------------------
 // Pallet Mapping Report — one row per (box, item) mapped onto a pallet.
 // T_PALLET_MAPPING_BOX -> T_PALLET_MAPPING (status) -> T_PREBIN_BOX -> T_PREBIN_ITEM (qty per item) -> Master_Part.
+// T_PREBIN_ITEM holds one row per scanned unit, so it is pre-aggregated to (box, item) BEFORE joining Master_Part.
+// Joining Master_Part per unit row and grouping afterwards timed out (40s): Master_Part.ItemCode is VARCHAR vs
+// NVARCHAR here, so every unit row paid for an implicit-conversion lookup. For the same reason Master_Part is joined
+// on a VARCHAR copy of the item code (ItemCodeV): that lets SQL Server seek PK_Master_Part instead of scanning it,
+// which the paged query could get away with but global search / export (no TOP 25) could not.
 // ---------------------------------------------------------------------------
+const PALLETMAPPING_ITEM_SOURCE = `(
+    SELECT PreBinBoxID, ItemCode, CAST(ItemCode AS VARCHAR(500)) AS ItemCodeV, SUM(Qty) AS Qty
+    FROM T_PREBIN_ITEM WITH (NOLOCK)
+    GROUP BY PreBinBoxID, ItemCode
+) pi`;
+const PALLETMAPPING_MASTER_PART_JOIN = `LEFT JOIN Master_Part mp WITH (NOLOCK) ON mp.ItemCode = pi.ItemCodeV AND (mp.isDelete = 0 OR mp.isDelete IS NULL)`;
+
+/** Adds stable tie-breakers so OFFSET paging never repeats/skips rows that share the sort value (e.g. same MappedAt). */
+function withPalletMappingTieBreak(orderBy) {
+    const extra = ['PalletMappingBoxID DESC'];
+    if (!/\bItemCode\b/i.test(orderBy)) extra.push('ItemCode ASC');
+    return `${orderBy}, ${extra.join(', ')}`;
+}
+
 function buildPalletMappingQuery(filters) {
     const conditions = [];
     const replacements = {};
@@ -138,22 +157,18 @@ function buildPalletMappingQuery(filters) {
             pm.CreatedBy AS PalletCreatedBy, pm.CreatedAt AS PalletCreatedAt, pm.CompletedBy AS PalletCompletedBy, pm.CompletedAt AS PalletCompletedAt,
             pmb.PalletMappingBoxID AS PalletMappingBoxID, pmb.BoxNumber AS BoxNumber, pmb.WarehouseCode AS WarehouseCode,
             pmb.ItemGroup AS BoxItemGroup, pmb.BoxTotalQty AS BoxTotalQty, pmb.MappedBy AS MappedBy, pmb.MappedAt AS MappedAt,
-            pi.ItemCode AS ItemCode, SUM(pi.Qty) AS ItemQty,
+            pi.ItemCode AS ItemCode, pi.Qty AS ItemQty,
             ${MASTER_PART_SELECT}
         `,
         fromJoin: `
             T_PALLET_MAPPING_BOX pmb WITH (NOLOCK)
             INNER JOIN T_PALLET_MAPPING pm WITH (NOLOCK) ON pm.PalletMappingID = pmb.PalletMappingID
             LEFT JOIN T_PREBIN_BOX pb WITH (NOLOCK) ON pb.BoxNumber = pmb.BoxNumber
-            LEFT JOIN T_PREBIN_ITEM pi WITH (NOLOCK) ON pi.PreBinBoxID = pb.PreBinBoxID
-            ${MASTER_PART_JOIN.replace('%ALIAS%', 'pi')}
+            LEFT JOIN ${PALLETMAPPING_ITEM_SOURCE} ON pi.PreBinBoxID = pb.PreBinBoxID
+            ${PALLETMAPPING_MASTER_PART_JOIN}
         `,
         whereSql: conditions.length ? `WHERE ${conditions.join(' AND ')}` : '',
-        groupBy: `
-            pm.PalletMappingID, pm.PalletID, pm.Status, pm.CreatedBy, pm.CreatedAt, pm.CompletedBy, pm.CompletedAt,
-            pmb.PalletMappingBoxID, pmb.BoxNumber, pmb.WarehouseCode, pmb.ItemGroup, pmb.BoxTotalQty, pmb.MappedBy, pmb.MappedAt,
-            pi.ItemCode, mp.ItemCode, mp.ItemName, mp.ItemGroup, mp.Category, mp.Description, mp.Color, mp.Size, mp.Style, mp.BinCapacity
-        `,
+        groupBy: null,
         sumSelect: 'SUM(pi.Qty) AS ItemQty',
         replacements
     };
@@ -161,12 +176,12 @@ function buildPalletMappingQuery(filters) {
 
 async function getPalletMappingReport(filters, { offset, pageSize, orderBy }) {
     const q = buildPalletMappingQuery(filters);
-    return runPagedQuery({ ...q, orderBy, offset, pageSize });
+    return runPagedQuery({ ...q, orderBy: withPalletMappingTieBreak(orderBy), offset, pageSize });
 }
 
 async function getPalletMappingReportForExport(filters, { orderBy, maxRows }) {
     const q = buildPalletMappingQuery(filters);
-    return runFullQuery({ ...q, orderBy, maxRows });
+    return runFullQuery({ ...q, orderBy: withPalletMappingTieBreak(orderBy), maxRows });
 }
 
 // ---------------------------------------------------------------------------
