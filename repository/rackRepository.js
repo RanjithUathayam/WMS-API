@@ -12,34 +12,58 @@ function isUniqueViolation(error) {
 const MASTER_PART_JOIN = `LEFT JOIN Master_Part mp WITH (NOLOCK) ON mp.ItemCode = %ALIAS%.ItemCode AND (mp.isDelete = 0 OR mp.isDelete IS NULL)`;
 
 /* ------------------------------------------------------------------------------------------------
- * Rack (= Location Master row, see sql/RackManagement_Schema.sql)
+ * Warehouse / Rack. No master data: a rack is just (WarehouseCode, scanned Rack QR). It is stored in the
+ * LocationCode columns of the T_RACK_* tables (see sql/RackManagement_NoMaster_Migration.sql).
+ *
+ * [BBLive] (CP850) and WMS_NEW (CP1) have different collations, so every SAP column that is compared
+ * with / unioned against a WMS column must be COLLATE DATABASE_DEFAULT or SQL Server raises a collation conflict.
  * ---------------------------------------------------------------------------------------------- */
 
-/** Warehouses that have at least one usable rack (non-INACTIVE location), named from SAP B1 OWHS. */
+/** Active SAP B1 warehouses (OWHS). */
 async function getRackWarehouses() {
     return sequelize.query(`
-        SELECT l.WarehouseCode AS whsCode, MAX(w.WhsName) AS whsName, COUNT(*) AS rackCount
-        FROM T_LOCATION l WITH (NOLOCK)
-        LEFT JOIN [BBLive].[dbo].OWHS w WITH (NOLOCK) ON w.WhsCode = l.WarehouseCode
-        WHERE l.Status <> 'INACTIVE'
-        GROUP BY l.WarehouseCode
-        ORDER BY l.WarehouseCode
+        SELECT
+            w.WhsCode AS whsCode,
+            w.WhsName AS whsName
+        FROM [BBLive].[dbo].OWHS w WITH (NOLOCK)
+        WHERE ISNULL(w.Inactive, 'N') <> 'Y'
+        ORDER BY w.WhsCode;
     `, {
         type: QueryTypes.SELECT
     });
 }
 
-/** Read-only rack lookup by its scanned LocationCode — used by Scan Rack / Scan Item. Save re-reads it under lock via locationRepository.lockLocationByCode. */
-async function findRackByCode(locationCode) {
+/** Canonical (correctly-cased) active warehouse from SAP OWHS, or null. */
+async function findWarehouse(whsCode) {
     const rows = await sequelize.query(`
-        SELECT LocationID, WarehouseCode, RowCode, PositionNo, LocationCode, Status
-        FROM T_LOCATION WITH (NOLOCK)
-        WHERE LocationCode = :locationCode
+        SELECT TOP 1 w.WhsCode AS whsCode, w.WhsName AS whsName
+        FROM [BBLive].[dbo].OWHS w WITH (NOLOCK)
+        WHERE w.WhsCode = :whsCode AND ISNULL(w.Inactive, 'N') <> 'Y'
     `, {
-        replacements: { locationCode },
+        replacements: { whsCode },
         type: QueryTypes.SELECT
     });
     return rows[0] || null;
+}
+
+/**
+ * Serializes every Save on one rack (there is no rack master row to lock). Transaction-owned app lock,
+ * released automatically on commit/rollback. Throws if it cannot be acquired within 30s.
+ */
+async function lockRack(transaction, whsCode, rackCode) {
+    const rows = await sequelize.query(`
+        DECLARE @result INT;
+        EXEC @result = sp_getapplock @Resource = :resource, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = 30000;
+        SELECT @result AS result;
+    `, {
+        replacements: { resource: `RACK|${whsCode}|${rackCode}`.toUpperCase().slice(0, 255) },
+        transaction,
+        type: QueryTypes.SELECT
+    });
+    const result = rows[0] ? Number(rows[0].result) : -999;
+    if (result < 0) {
+        throw new Error(`Could not lock rack ${rackCode} (sp_getapplock returned ${result}).`);
+    }
 }
 
 /* ------------------------------------------------------------------------------------------------
@@ -49,7 +73,7 @@ async function findRackByCode(locationCode) {
 /** Item identity from SAP B1 OITM (the item master Pre-Binning validates against), with Master_Part as the name/group fallback. Null when neither knows the item. */
 async function findItem(itemCode) {
     const rows = await sequelize.query(`
-        SELECT 'SAP' AS Source, o.ItemCode, o.ItemName, NULL AS ItemGroup
+        SELECT 'SAP' AS Source, o.ItemCode COLLATE DATABASE_DEFAULT AS ItemCode, o.ItemName COLLATE DATABASE_DEFAULT AS ItemName, NULL AS ItemGroup
         FROM [BBLive].[dbo].OITM o WITH (NOLOCK)
         WHERE o.ItemCode = :itemCode
         UNION ALL
@@ -75,54 +99,54 @@ async function findItem(itemCode) {
  * ---------------------------------------------------------------------------------------------- */
 
 /** Every item currently held in a rack (Quantity > 0), with item name. */
-async function getRackStock(locationId) {
+async function getRackStock(whsCode, rackCode) {
     return sequelize.query(`
         SELECT ri.RackInventoryID, ri.LocationID, ri.LocationCode, ri.WarehouseCode, ri.RowCode,
                ri.ItemCode, ri.ItemGroup, ri.Quantity, ri.UpdatedAt, ri.CreatedAt,
                mp.ItemName AS ItemName
         FROM T_RACK_INVENTORY ri WITH (NOLOCK)
         ${MASTER_PART_JOIN.replace('%ALIAS%', 'ri')}
-        WHERE ri.LocationID = :locationId AND ri.Quantity > 0
+        WHERE ri.WarehouseCode = :whsCode AND ri.LocationCode = :rackCode AND ri.Quantity > 0
         ORDER BY ri.ItemCode
     `, {
-        replacements: { locationId },
+        replacements: { whsCode, rackCode },
         type: QueryTypes.SELECT
     });
 }
 
-async function findRackStockRow(locationId, itemCode) {
+async function findRackStockRow(whsCode, rackCode, itemCode) {
     const rows = await sequelize.query(`
-        SELECT RackInventoryID, LocationID, ItemCode, ItemGroup, Quantity
+        SELECT RackInventoryID, WarehouseCode, LocationCode, ItemCode, ItemGroup, Quantity
         FROM T_RACK_INVENTORY WITH (NOLOCK)
-        WHERE LocationID = :locationId AND ItemCode = :itemCode
+        WHERE WarehouseCode = :whsCode AND LocationCode = :rackCode AND ItemCode = :itemCode
     `, {
-        replacements: { locationId, itemCode },
+        replacements: { whsCode, rackCode, itemCode },
         type: QueryTypes.SELECT
     });
     return rows[0] || null;
 }
 
 /** Locks the (rack, item) stock row for Save. HOLDLOCK also range-locks a not-yet-existing row, so two concurrent first-time stores of the same item serialize instead of racing on the insert. */
-async function lockRackStockRow(transaction, locationId, itemCode) {
+async function lockRackStockRow(transaction, whsCode, rackCode, itemCode) {
     const rows = await sequelize.query(`
-        SELECT RackInventoryID, LocationID, ItemCode, ItemGroup, Quantity
+        SELECT RackInventoryID, WarehouseCode, LocationCode, ItemCode, ItemGroup, Quantity
         FROM T_RACK_INVENTORY WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
-        WHERE LocationID = :locationId AND ItemCode = :itemCode
+        WHERE WarehouseCode = :whsCode AND LocationCode = :rackCode AND ItemCode = :itemCode
     `, {
-        replacements: { locationId, itemCode },
+        replacements: { whsCode, rackCode, itemCode },
         transaction,
         type: QueryTypes.SELECT
     });
     return rows[0] || null;
 }
 
-async function insertRackStockRow(transaction, { locationId, locationCode, warehouseCode, rowCode, itemCode, itemGroup, quantity, createdBy }) {
+async function insertRackStockRow(transaction, { locationCode, warehouseCode, itemCode, itemGroup, quantity, createdBy }) {
     const rows = await sequelize.query(`
         INSERT INTO T_RACK_INVENTORY (LocationID, LocationCode, WarehouseCode, RowCode, ItemCode, ItemGroup, Quantity, CreatedBy, CreatedAt)
-        OUTPUT INSERTED.RackInventoryID, INSERTED.LocationID, INSERTED.ItemCode, INSERTED.ItemGroup, INSERTED.Quantity
-        VALUES (:locationId, :locationCode, :warehouseCode, :rowCode, :itemCode, :itemGroup, :quantity, :createdBy, GETDATE())
+        OUTPUT INSERTED.RackInventoryID, INSERTED.WarehouseCode, INSERTED.LocationCode, INSERTED.ItemCode, INSERTED.ItemGroup, INSERTED.Quantity
+        VALUES (NULL, :locationCode, :warehouseCode, NULL, :itemCode, :itemGroup, :quantity, :createdBy, GETDATE())
     `, {
-        replacements: { locationId, locationCode, warehouseCode, rowCode, itemCode, itemGroup, quantity, createdBy },
+        replacements: { locationCode, warehouseCode, itemCode, itemGroup: itemGroup || null, quantity, createdBy },
         transaction,
         type: QueryTypes.SELECT
     });
@@ -148,7 +172,7 @@ async function setRackStockQty(transaction, rackInventoryId, { quantity, itemGro
 
 async function findTag({ itemCode, grnNo, uniqueNumber }) {
     const rows = await sequelize.query(`
-        SELECT ItemCode, GRNNo, UniqueNumber, Status, LocationID, LocationCode, Qty, LastTransactionID
+        SELECT ItemCode, GRNNo, UniqueNumber, Status, WarehouseCode, LocationCode, Qty, LastTransactionID
         FROM T_RACK_ITEM_TAG WITH (NOLOCK)
         WHERE ItemCode = :itemCode AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
     `, {
@@ -161,7 +185,7 @@ async function findTag({ itemCode, grnNo, uniqueNumber }) {
 /** Locks a tag's state row (or, with HOLDLOCK, the key range where it would be inserted). */
 async function lockTag(transaction, { itemCode, grnNo, uniqueNumber }) {
     const rows = await sequelize.query(`
-        SELECT ItemCode, GRNNo, UniqueNumber, Status, LocationID, LocationCode, Qty, LastTransactionID
+        SELECT ItemCode, GRNNo, UniqueNumber, Status, WarehouseCode, LocationCode, Qty, LastTransactionID
         FROM T_RACK_ITEM_TAG WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
         WHERE ItemCode = :itemCode AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
     `, {
@@ -172,19 +196,19 @@ async function lockTag(transaction, { itemCode, grnNo, uniqueNumber }) {
     return rows[0] || null;
 }
 
-async function upsertTag(transaction, { itemCode, grnNo, uniqueNumber, status, locationId, locationCode, qty, transactionId, updatedBy }) {
+async function upsertTag(transaction, { itemCode, grnNo, uniqueNumber, status, warehouseCode, locationCode, qty, transactionId, updatedBy }) {
     await sequelize.query(`
         MERGE T_RACK_ITEM_TAG WITH (HOLDLOCK) AS target
         USING (SELECT :itemCode AS ItemCode, :grnNo AS GRNNo, :uniqueNumber AS UniqueNumber) AS src
             ON target.ItemCode = src.ItemCode AND target.GRNNo = src.GRNNo AND target.UniqueNumber = src.UniqueNumber
         WHEN MATCHED THEN
-            UPDATE SET Status = :status, LocationID = :locationId, LocationCode = :locationCode, Qty = :qty,
+            UPDATE SET Status = :status, LocationID = NULL, WarehouseCode = :warehouseCode, LocationCode = :locationCode, Qty = :qty,
                        LastTransactionID = :transactionId, UpdatedBy = :updatedBy, UpdatedAt = GETDATE()
         WHEN NOT MATCHED THEN
-            INSERT (ItemCode, GRNNo, UniqueNumber, Status, LocationID, LocationCode, Qty, LastTransactionID, UpdatedBy, UpdatedAt)
-            VALUES (:itemCode, :grnNo, :uniqueNumber, :status, :locationId, :locationCode, :qty, :transactionId, :updatedBy, GETDATE());
+            INSERT (ItemCode, GRNNo, UniqueNumber, Status, LocationID, WarehouseCode, LocationCode, Qty, LastTransactionID, UpdatedBy, UpdatedAt)
+            VALUES (:itemCode, :grnNo, :uniqueNumber, :status, NULL, :warehouseCode, :locationCode, :qty, :transactionId, :updatedBy, GETDATE());
     `, {
-        replacements: { itemCode, grnNo, uniqueNumber, status, locationId, locationCode, qty, transactionId, updatedBy },
+        replacements: { itemCode, grnNo, uniqueNumber, status, warehouseCode, locationCode, qty, transactionId, updatedBy },
         transaction,
         type: QueryTypes.INSERT
     });
@@ -210,7 +234,7 @@ async function insertTransaction(transaction, h) {
                 (:transactionType, :locationId, :locationCode, :warehouseCode, :rowCode, :totalLines, :totalQty, :clientRequestId, :deviceId, :createdBy, GETDATE())
         `, {
             replacements: {
-                transactionType: h.transactionType, locationId: h.locationId, locationCode: h.locationCode,
+                transactionType: h.transactionType, locationId: null, locationCode: h.locationCode,
                 warehouseCode: h.warehouseCode, rowCode: h.rowCode || null, totalLines: h.totalLines, totalQty: h.totalQty,
                 clientRequestId: h.clientRequestId || null, deviceId: h.deviceId || null, createdBy: h.createdBy
             },
@@ -319,7 +343,8 @@ async function listTransactions({ transactionType, warehouseCode, rackCode, item
 module.exports = {
     isUniqueViolation,
     getRackWarehouses,
-    findRackByCode,
+    findWarehouse,
+    lockRack,
     findItem,
     getRackStock,
     findRackStockRow,

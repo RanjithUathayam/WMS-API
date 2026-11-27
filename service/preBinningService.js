@@ -354,6 +354,58 @@ async function completeBoxAsync({ boxNumber, whsCode }, user) {
     });
 }
 
+/**
+ * Deletes a box (IN_PROGRESS or COMPLETED) as long as it has not been mapped to a pallet yet.
+ * Removes its scanned items (freeing their ItemCode + GRNNo + UniqueNumber for re-scanning), the box
+ * row itself, and — for a completed box — the T_BIN_COMPLETE rows it wrote, re-syncing
+ * ERP_Pre_Binning.Binning_Qty for each affected GRN line. The box number becomes reusable afterwards.
+ */
+async function deleteBoxAsync({ boxNumber, whsCode }, user) {
+    if (isBlank(boxNumber)) {
+        throw new PreBinningError('MISSING_FIELDS', 'boxNumber is required.');
+    }
+    if (isBlank(whsCode)) {
+        throw new PreBinningError('WAREHOUSE_REQUIRED', 'Please select a warehouse before continuing.');
+    }
+
+    const trimmedBoxNumber = String(boxNumber).trim();
+    const trimmedWhsCode = String(whsCode).trim();
+
+    return sequelize.transaction(async (transaction) => {
+        // Same lock pallet mapping takes before mapping a box — serialises delete vs. map.
+        const box = await repository.lockLatestBoxByNumber(transaction, trimmedBoxNumber);
+        if (!box) {
+            throw new PreBinningError('BOX_NOT_FOUND', `Box ${trimmedBoxNumber} was not found.`);
+        }
+        if (box.WarehouseCode !== trimmedWhsCode) {
+            throw new PreBinningError('BOX_WAREHOUSE_MISMATCH', `Box ${trimmedBoxNumber} belongs to warehouse ${box.WarehouseCode}.`);
+        }
+
+        const mapping = await repository.findPalletMappingForBox(transaction, trimmedBoxNumber);
+        if (mapping) {
+            throw new PreBinningError('BOX_ALREADY_MAPPED', `Box ${trimmedBoxNumber} is already mapped to pallet ${mapping.PalletID} and cannot be deleted.`);
+        }
+
+        if (box.Status === 'COMPLETED') {
+            const keys = await repository.getBinCompleteKeysForBox(transaction, trimmedWhsCode, trimmedBoxNumber);
+            await repository.deleteBinCompleteRowsForBox(transaction, trimmedWhsCode, trimmedBoxNumber);
+            for (const key of keys) {
+                await repository.syncBinningQty(transaction, key.GRNNo, key.ItemCode);
+            }
+        }
+
+        await repository.deleteBoxWithItems(transaction, box.PreBinBoxID);
+
+        return {
+            boxNumber: trimmedBoxNumber,
+            whsCode: trimmedWhsCode,
+            previousStatus: box.Status,
+            totalQty: Number(box.TotalQty),
+            deletedBy: user && user.UserName
+        };
+    });
+}
+
 module.exports = {
     PreBinningError,
     parseItemQr,
@@ -363,5 +415,6 @@ module.exports = {
     validateBoxAsync,
     scanItemAsync,
     getBoxItemsAsync,
-    completeBoxAsync
+    completeBoxAsync,
+    deleteBoxAsync
 };

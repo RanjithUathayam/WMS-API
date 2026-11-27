@@ -1,13 +1,13 @@
 const { sequelize } = require('../config/database');
 const repository = require('../repository/rackRepository');
-const locationRepository = require('../repository/locationRepository');
 const { parseItemQr } = require('./preBinningService');
 const { isBlank, readString, toQty, subtractQty, sumQty } = require('./pickingCommon');
 
 /**
  * Rack Management — Rack Store (adds loose items to a rack) and Rack Picking (takes them out).
- * A Rack is a Location Master row scanned by its LocationCode; stock lives in T_RACK_INVENTORY.
- * See sql/RackManagement_Schema.sql for the data model and design decisions.
+ * No master data: a Rack is simply the scanned Rack QR code inside the selected (SAP) warehouse. It comes
+ * into existence with its first saved Store. Stock lives in T_RACK_INVENTORY keyed by (WarehouseCode,
+ * LocationCode = rack code, ItemCode). See sql/RackManagement_NoMaster_Migration.sql.
  */
 
 class RackError extends Error {
@@ -21,6 +21,7 @@ class RackError extends Error {
 const MODES = ['STORE', 'PICK'];
 const MAX_LINES_PER_SAVE = 500;
 const MAX_QTY = 999999999;
+const MAX_RACK_CODE_LENGTH = 150;
 const DEFAULT_HISTORY_PAGE_SIZE = 50;
 const MAX_HISTORY_PAGE_SIZE = 200;
 
@@ -48,12 +49,30 @@ function readWarehouse(body) {
     return whsCode;
 }
 
+/** Any scanned code is a valid rack, except an item label scanned into the rack field by mistake. */
 function readRackCode(body) {
-    const rackCode = readString(body && (body.rackCode || body.locationCode));
+    const rackCode = readString(body && (body.rackCode || body.locationCode)).toUpperCase();
     if (isBlank(rackCode)) {
         throw new RackError('MISSING_FIELDS', 'Rack QR code is required.');
     }
+    if (rackCode.includes('|')) {
+        throw new RackError('INVALID_RACK_QR', 'This is an item label, not a Rack QR code. Please scan the Rack QR code.');
+    }
+    if (rackCode.length > MAX_RACK_CODE_LENGTH) {
+        throw new RackError('INVALID_RACK_QR', `Rack QR code must be at most ${MAX_RACK_CODE_LENGTH} characters.`);
+    }
     return rackCode;
+}
+
+/** Selected warehouse (must be an active SAP warehouse) + scanned rack code -> the rack. */
+async function resolveRack(body) {
+    const whsCode = readWarehouse(body);
+    const rackCode = readRackCode(body);
+    const warehouse = await repository.findWarehouse(whsCode);
+    if (!warehouse) {
+        throw new RackError('INVALID_WAREHOUSE', `Warehouse ${whsCode} was not found or is inactive.`);
+    }
+    return { WarehouseCode: warehouse.whsCode, LocationCode: rackCode };
 }
 
 /** Positive quantity with at most 3 decimals (DECIMAL(18,3)). */
@@ -98,22 +117,6 @@ function parseItemScan(rawQr) {
     }
 }
 
-/** Rejects unknown / deactivated / blocked racks, and racks outside the selected warehouse. */
-function assertRackUsable(rack, rackCode, whsCode) {
-    if (!rack) {
-        throw new RackError('RACK_NOT_FOUND', `Rack ${rackCode} was not found.`);
-    }
-    if (!sameCode(rack.WarehouseCode, whsCode)) {
-        throw new RackError('WAREHOUSE_MISMATCH', `Rack ${rack.LocationCode} belongs to warehouse ${rack.WarehouseCode}, not ${whsCode}.`);
-    }
-    if (rack.Status === 'INACTIVE') {
-        throw new RackError('RACK_INACTIVE', `Rack ${rack.LocationCode} is inactive.`);
-    }
-    if (rack.Status === 'BLOCKED') {
-        throw new RackError('RACK_BLOCKED', `Rack ${rack.LocationCode} is blocked.`);
-    }
-}
-
 /** Tag state rules shared by Scan Item (read-only pre-check) and Save (authoritative, under lock). */
 function assertTagAllowed(mode, tag, line, rack) {
     if (!tag) return;
@@ -125,8 +128,9 @@ function assertTagAllowed(mode, tag, line, rack) {
         if (tag.Status === 'PICKED') {
             throw new RackError('TAG_ALREADY_PICKED', `Item ${label} has already been picked from rack ${tag.LocationCode}.`);
         }
-        if (Number(tag.LocationID) !== Number(rack.LocationID)) {
-            throw new RackError('ITEM_NOT_IN_RACK', `Item ${label} is stored in rack ${tag.LocationCode}, not ${rack.LocationCode}.`);
+        if (!sameCode(tag.LocationCode, rack.LocationCode) || !sameCode(tag.WarehouseCode, rack.WarehouseCode)) {
+            const where = tag.WarehouseCode ? `${tag.WarehouseCode} / ${tag.LocationCode}` : tag.LocationCode;
+            throw new RackError('ITEM_NOT_IN_RACK', `Item ${label} is stored in rack ${where}, not ${rack.LocationCode}.`);
         }
     }
 }
@@ -141,12 +145,8 @@ async function requireItem(itemCode) {
 
 function toRackDto(rack) {
     return {
-        locationId: rack.LocationID,
         rackCode: rack.LocationCode,
-        warehouseCode: rack.WarehouseCode,
-        rowCode: rack.RowCode,
-        positionNo: rack.PositionNo,
-        status: rack.Status
+        warehouseCode: rack.WarehouseCode
     };
 }
 
@@ -166,10 +166,8 @@ function toTransactionDto(h) {
         transactionId: h.RackTransactionID,
         transactionNo: h.TransactionNo,
         mode: h.TransactionType,
-        locationId: h.LocationID,
         rackCode: h.LocationCode,
         warehouseCode: h.WarehouseCode,
-        rowCode: h.RowCode,
         totalLines: Number(h.TotalLines),
         totalQty: toQty(h.TotalQty),
         deviceId: h.DeviceID || null,
@@ -197,26 +195,22 @@ function toDetailDto(d) {
  * Warehouses
  * ============================================================================================== */
 
-/** Warehouses the operator can pick from: only those that have at least one usable rack. */
+/** Active SAP warehouses. */
 async function getWarehousesAsync() {
     const rows = await repository.getRackWarehouses();
-    return rows.map(r => ({ warehouseCode: r.whsCode, warehouseName: r.whsName || r.whsCode, rackCount: Number(r.rackCount) }));
+    return rows.map(r => ({ warehouseCode: r.whsCode, warehouseName: r.whsName || r.whsCode }));
 }
 
 /* ================================================================================================
  * Scan Rack / Scan Item (read-only validation for immediate operator feedback)
  * ============================================================================================== */
 
-/** Scan Rack — validates the rack and returns what it currently holds. Picking needs a non-empty rack. */
+/** Scan Rack — accepts any rack code in the selected warehouse and returns what it currently holds (empty for a new rack). Picking needs a non-empty rack. */
 async function scanRackAsync(body) {
     const mode = readMode(body && body.mode);
-    const whsCode = readWarehouse(body);
-    const rackCode = readRackCode(body);
+    const rack = await resolveRack(body);
 
-    const rack = await repository.findRackByCode(rackCode);
-    assertRackUsable(rack, rackCode, whsCode);
-
-    const stock = (await repository.getRackStock(rack.LocationID)).map(toStockDto);
+    const stock = (await repository.getRackStock(rack.WarehouseCode, rack.LocationCode)).map(toStockDto);
     if (mode === 'PICK' && stock.length === 0) {
         throw new RackError('RACK_EMPTY', `Rack ${rack.LocationCode} has no stock to pick.`);
     }
@@ -236,20 +230,17 @@ async function scanRackAsync(body) {
  */
 async function scanItemAsync(body) {
     const mode = readMode(body && body.mode);
-    const whsCode = readWarehouse(body);
-    const rackCode = readRackCode(body);
     const scan = parseItemScan(body && body.itemQr);
     const scannedQty = isBlank(body && body.scannedQty) ? 0 : Number(body.scannedQty);
     if (!Number.isFinite(scannedQty) || scannedQty < 0) {
         throw new RackError('INVALID_REQUEST', 'scannedQty must be 0 or more.');
     }
 
-    const rack = await repository.findRackByCode(rackCode);
-    assertRackUsable(rack, rackCode, whsCode);
+    const rack = await resolveRack(body);
     const item = await requireItem(scan.itemCode);
     const line = { ...scan, itemCode: item.ItemCode };
 
-    const stockRow = await repository.findRackStockRow(rack.LocationID, item.ItemCode);
+    const stockRow = await repository.findRackStockRow(rack.WarehouseCode, rack.LocationCode, item.ItemCode);
     const availableQty = stockRow ? toQty(stockRow.Quantity) : 0;
 
     if (line.tagged) {
@@ -323,15 +314,15 @@ function parseSaveLines(rawItems) {
 
 function parseSaveRequest(body) {
     const mode = readMode(body && body.mode);
-    const whsCode = readWarehouse(body);
-    const rackCode = readRackCode(body);
+    readWarehouse(body);
+    readRackCode(body);
     const clientRequestId = readString(body && body.clientRequestId) || null;
     if (clientRequestId && clientRequestId.length > 100) {
         throw new RackError('INVALID_REQUEST', 'clientRequestId must be at most 100 characters.');
     }
     const deviceId = readString(body && body.deviceId).slice(0, 100) || null;
     const lines = parseSaveLines(body && body.items);
-    return { mode, whsCode, rackCode, clientRequestId, deviceId, lines };
+    return { mode, clientRequestId, deviceId, lines };
 }
 
 async function duplicateSaveResult(clientRequestId) {
@@ -343,13 +334,14 @@ async function duplicateSaveResult(clientRequestId) {
 
 /**
  * Store: adds every line's qty to T_RACK_INVENTORY. Pick: deducts it (never below 0).
- * One transaction, fixed lock order: rack (T_LOCATION) -> stock rows (by ItemCode) -> tags (by key).
+ * One transaction, fixed lock order: rack (app lock) -> stock rows (by ItemCode) -> tags (by key).
  * Every quantity is re-read under lock; any failure rolls back the whole batch, so inventory and the
  * transaction record are always written together or not at all.
  */
 async function saveAsync(body, user) {
     const req = parseSaveRequest(body);
     const createdBy = userName(user);
+    const rack = await resolveRack(body);
 
     if (req.clientRequestId) {
         const duplicate = await duplicateSaveResult(req.clientRequestId);
@@ -370,15 +362,12 @@ async function saveAsync(body, user) {
 
     try {
         const saved = await sequelize.transaction(async (transaction) => {
-            const rack = await locationRepository.lockLocationByCode(transaction, req.rackCode);
-            assertRackUsable(rack, req.rackCode, req.whsCode);
+            await repository.lockRack(transaction, rack.WarehouseCode, rack.LocationCode);
 
             const header = await repository.insertTransaction(transaction, {
                 transactionType: req.mode,
-                locationId: rack.LocationID,
                 locationCode: rack.LocationCode,
                 warehouseCode: rack.WarehouseCode,
-                rowCode: rack.RowCode,
                 totalLines: req.lines.length,
                 totalQty,
                 clientRequestId: req.clientRequestId,
@@ -392,7 +381,7 @@ async function saveAsync(body, user) {
             for (const itemCode of itemCodes) {
                 const itemLines = req.lines.filter(l => l.itemCode === itemCode);
                 const itemQty = sumQty(itemLines.map(l => l.qty));
-                const row = await repository.lockRackStockRow(transaction, rack.LocationID, itemCode);
+                const row = await repository.lockRackStockRow(transaction, rack.WarehouseCode, rack.LocationCode, itemCode);
                 const before = row ? toQty(row.Quantity) : 0;
 
                 let after;
@@ -417,8 +406,7 @@ async function saveAsync(body, user) {
                     });
                 } else {
                     const inserted = await repository.insertRackStockRow(transaction, {
-                        locationId: rack.LocationID, locationCode: rack.LocationCode, warehouseCode: rack.WarehouseCode,
-                        rowCode: rack.RowCode, itemCode, itemGroup: itemLines[0].itemGroup, quantity: after, createdBy
+                        locationCode: rack.LocationCode, warehouseCode: rack.WarehouseCode, itemCode, itemGroup: itemLines[0].itemGroup, quantity: after, createdBy
                     });
                     rackInventoryId = inserted.RackInventoryID;
                 }
@@ -433,7 +421,7 @@ async function saveAsync(body, user) {
                 await repository.upsertTag(transaction, {
                     itemCode: line.itemCode, grnNo: line.grnNo, uniqueNumber: line.uniqueNumber,
                     status: req.mode === 'STORE' ? 'STORED' : 'PICKED',
-                    locationId: rack.LocationID, locationCode: rack.LocationCode, qty: line.qty,
+                    warehouseCode: rack.WarehouseCode, locationCode: rack.LocationCode, qty: line.qty,
                     transactionId: header.RackTransactionID, updatedBy: createdBy
                 });
             }
@@ -507,7 +495,7 @@ async function listHistoryAsync(query = {}) {
     const { rows, total } = await repository.listTransactions({
         transactionType: mode,
         warehouseCode: readString(query.whsCode || query.warehouseCode) || null,
-        rackCode: readString(query.rackCode) || null,
+        rackCode: readString(query.rackCode).toUpperCase() || null,
         itemCode: readString(query.itemCode) || null,
         createdBy: readString(query.createdBy) || null,
         fromDate: readDate(query.fromDate, 'fromDate'),

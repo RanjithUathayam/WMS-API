@@ -2,35 +2,35 @@ jest.mock('../config/database', () => ({
     sequelize: { transaction: jest.fn(fn => fn({})) }
 }));
 jest.mock('../repository/rackRepository');
-jest.mock('../repository/locationRepository');
 jest.mock('../repository/preBinningRepository');
 
 const repository = require('../repository/rackRepository');
-const locationRepository = require('../repository/locationRepository');
 const service = require('../service/rackService');
 
-const RACK = { LocationID: 5, WarehouseCode: 'WH1', RowCode: 'A', PositionNo: 5, LocationCode: 'WH1-A-005', Status: 'AVAILABLE' };
-const OTHER_RACK = { ...RACK, LocationID: 6, LocationCode: 'WH1-A-006' };
+// No master data: a rack is just (warehouse, scanned rack code).
+const RACK = { WarehouseCode: 'WH1', LocationCode: 'WH1-A-005' };
+const OTHER_RACK = { WarehouseCode: 'WH1', LocationCode: 'WH1-A-006' };
 const ITEM = { ItemCode: 'ITM-1', ItemName: 'Widget', ItemGroup: 'GRP' };
 const TAG_QR = 'ITM-1|T1|GRN1|GRP|0001|2';
 const TAG_QR_2 = 'ITM-1|T1|GRN1|GRP|0002|3';
 
 beforeEach(() => {
     jest.clearAllMocks();
-    repository.findRackByCode.mockResolvedValue(RACK);
+    repository.findWarehouse.mockImplementation(async (code) => (String(code).toUpperCase() === 'WH1' || String(code).toUpperCase() === 'WH2')
+        ? { whsCode: String(code).toUpperCase(), whsName: 'Warehouse ' + code } : null);
+    repository.lockRack.mockResolvedValue(undefined);
     repository.findItem.mockResolvedValue(ITEM);
     repository.findRackStockRow.mockResolvedValue(null);
     repository.findTag.mockResolvedValue(null);
     repository.getRackStock.mockResolvedValue([]);
     repository.findTransactionByClientRequestId.mockResolvedValue(null);
-    locationRepository.lockLocationByCode.mockResolvedValue(RACK);
     repository.lockRackStockRow.mockResolvedValue(null);
     repository.lockTag.mockResolvedValue(null);
     repository.insertRackStockRow.mockImplementation(async (tx, r) => ({ RackInventoryID: 77, Quantity: r.quantity }));
     repository.insertTransaction.mockImplementation(async (tx, h) => ({
         RackTransactionID: 900, TransactionNo: h.transactionType === 'STORE' ? 'RS00000900' : 'RP00000900',
-        TransactionType: h.transactionType, LocationID: h.locationId, LocationCode: h.locationCode,
-        WarehouseCode: h.warehouseCode, RowCode: h.rowCode, TotalLines: h.totalLines, TotalQty: h.totalQty,
+        TransactionType: h.transactionType, LocationCode: h.locationCode,
+        WarehouseCode: h.warehouseCode, TotalLines: h.totalLines, TotalQty: h.totalQty,
         CreatedBy: h.createdBy, CreatedAt: '2026-10-21T10:00:00Z'
     }));
 });
@@ -60,35 +60,32 @@ describe('scanRackAsync', () => {
         await expect(service.scanRackAsync({ mode: 'STORE', rackCode: 'WH1-A-005' })).rejects.toMatchObject({ code: 'WAREHOUSE_REQUIRED' });
     });
 
-    test('rejects a rack from another warehouse', async () => {
-        await expect(service.scanRackAsync({ whsCode: 'WH2', mode: 'STORE', rackCode: 'WH1-A-005' }))
-            .rejects.toMatchObject({ code: 'WAREHOUSE_MISMATCH' });
+    test('rejects an unknown or inactive SAP warehouse', async () => {
+        await expect(service.scanRackAsync({ whsCode: 'NOPE', mode: 'STORE', rackCode: 'WH1-A-005' }))
+            .rejects.toMatchObject({ code: 'INVALID_WAREHOUSE' });
     });
 
-    test('matches the warehouse case-insensitively', async () => {
-        await expect(service.scanRackAsync({ whsCode: 'wh1', mode: 'STORE', rackCode: 'WH1-A-005' })).resolves.toBeTruthy();
+    test('uses the canonical warehouse code and an upper-cased rack code', async () => {
+        const result = await service.scanRackAsync({ whsCode: 'wh1', mode: 'STORE', rackCode: ' thdw-a01 ' });
+        expect(result.rack).toEqual({ rackCode: 'THDW-A01', warehouseCode: 'WH1' });
+        expect(repository.getRackStock).toHaveBeenCalledWith('WH1', 'THDW-A01');
     });
 
     test('rejects an invalid mode', async () => {
         await expect(service.scanRackAsync({ whsCode: 'WH1', mode: 'MOVE', rackCode: 'WH1-A-005' })).rejects.toMatchObject({ code: 'INVALID_MODE' });
     });
 
-    test('rejects an unknown rack', async () => {
-        repository.findRackByCode.mockResolvedValue(null);
-        await expect(service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'NOPE' })).rejects.toMatchObject({ code: 'RACK_NOT_FOUND' });
+    test('accepts any new rack code without master data (empty stock)', async () => {
+        const result = await service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'BRAND-NEW-RACK' });
+        expect(result).toMatchObject({ mode: 'STORE', rack: { rackCode: 'BRAND-NEW-RACK', warehouseCode: 'WH1' }, stock: [], totalQty: 0 });
     });
 
-    test('rejects an inactive or blocked rack', async () => {
-        repository.findRackByCode.mockResolvedValue({ ...RACK, Status: 'INACTIVE' });
-        await expect(service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005' })).rejects.toMatchObject({ code: 'RACK_INACTIVE' });
-        repository.findRackByCode.mockResolvedValue({ ...RACK, Status: 'BLOCKED' });
-        await expect(service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005' })).rejects.toMatchObject({ code: 'RACK_BLOCKED' });
+    test('rejects an item label scanned into the rack field', async () => {
+        await expect(service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: TAG_QR })).rejects.toMatchObject({ code: 'INVALID_RACK_QR' });
     });
 
-    test('allows storing into an empty rack (and a pallet-occupied one)', async () => {
-        repository.findRackByCode.mockResolvedValue({ ...RACK, Status: 'OCCUPIED' });
-        const result = await service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005' });
-        expect(result).toMatchObject({ mode: 'STORE', rack: { rackCode: 'WH1-A-005' }, stock: [], totalQty: 0 });
+    test('rejects a blank rack code', async () => {
+        await expect(service.scanRackAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: '   ' })).rejects.toMatchObject({ code: 'MISSING_FIELDS' });
     });
 
     test('rejects picking from an empty rack', async () => {
@@ -121,13 +118,13 @@ describe('scanItemAsync', () => {
     });
 
     test('store: rejects a label already stored in a rack', async () => {
-        repository.findTag.mockResolvedValue({ Status: 'STORED', LocationID: 6, LocationCode: 'WH1-A-006' });
+        repository.findTag.mockResolvedValue({ Status: 'STORED', WarehouseCode: 'WH1', LocationCode: 'WH1-A-006' });
         await expect(service.scanItemAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005', itemQr: TAG_QR }))
             .rejects.toMatchObject({ code: 'TAG_ALREADY_STORED' });
     });
 
     test('store: a previously picked label can be stored again', async () => {
-        repository.findTag.mockResolvedValue({ Status: 'PICKED', LocationID: 6, LocationCode: 'WH1-A-006' });
+        repository.findTag.mockResolvedValue({ Status: 'PICKED', WarehouseCode: 'WH1', LocationCode: 'WH1-A-006' });
         await expect(service.scanItemAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005', itemQr: TAG_QR })).resolves.toBeTruthy();
     });
 
@@ -138,14 +135,14 @@ describe('scanItemAsync', () => {
 
     test('pick: rejects a label stored in a different rack', async () => {
         repository.findRackStockRow.mockResolvedValue({ RackInventoryID: 1, Quantity: 10 });
-        repository.findTag.mockResolvedValue({ Status: 'STORED', LocationID: 6, LocationCode: 'WH1-A-006' });
+        repository.findTag.mockResolvedValue({ Status: 'STORED', WarehouseCode: 'WH1', LocationCode: 'WH1-A-006' });
         await expect(service.scanItemAsync({ whsCode: 'WH1', mode: 'PICK', rackCode: 'WH1-A-005', itemQr: TAG_QR }))
             .rejects.toMatchObject({ code: 'ITEM_NOT_IN_RACK' });
     });
 
     test('pick: rejects a label already picked', async () => {
         repository.findRackStockRow.mockResolvedValue({ RackInventoryID: 1, Quantity: 10 });
-        repository.findTag.mockResolvedValue({ Status: 'PICKED', LocationID: 5, LocationCode: 'WH1-A-005' });
+        repository.findTag.mockResolvedValue({ Status: 'PICKED', WarehouseCode: 'WH1', LocationCode: 'WH1-A-005' });
         await expect(service.scanItemAsync({ whsCode: 'WH1', mode: 'PICK', rackCode: 'WH1-A-005', itemQr: TAG_QR }))
             .rejects.toMatchObject({ code: 'TAG_ALREADY_PICKED' });
     });
@@ -186,7 +183,7 @@ describe('saveAsync — validation', () => {
         const result = await service.saveAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005', clientRequestId: 'abc', items: [{ itemQr: TAG_QR }] }, { UserName: 'op' });
 
         expect(result).toMatchObject({ duplicate: true, transactionNo: 'RS00000900' });
-        expect(locationRepository.lockLocationByCode).not.toHaveBeenCalled();
+        expect(repository.lockRack).not.toHaveBeenCalled();
         expect(repository.setRackStockQty).not.toHaveBeenCalled();
     });
 
@@ -205,19 +202,19 @@ describe('saveAsync — validation', () => {
 });
 
 describe('getWarehousesAsync', () => {
-    test('maps warehouses that have racks', async () => {
-        repository.getRackWarehouses.mockResolvedValue([{ whsCode: 'WH1', whsName: 'Main', rackCount: 12 }, { whsCode: 'WH9', whsName: null, rackCount: 1 }]);
+    test('maps SAP warehouses', async () => {
+        repository.getRackWarehouses.mockResolvedValue([{ whsCode: 'WH1', whsName: 'Main' }, { whsCode: 'WH9', whsName: null }]);
         await expect(service.getWarehousesAsync()).resolves.toEqual([
-            { warehouseCode: 'WH1', warehouseName: 'Main', rackCount: 12 },
-            { warehouseCode: 'WH9', warehouseName: 'WH9', rackCount: 1 }
+            { warehouseCode: 'WH1', warehouseName: 'Main' },
+            { warehouseCode: 'WH9', warehouseName: 'WH9' }
         ]);
     });
 });
 
 describe('saveAsync — store', () => {
-    test('rejects a save whose rack is not in the selected warehouse', async () => {
-        await expect(service.saveAsync({ whsCode: 'WH2', mode: 'STORE', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }] }, {}))
-            .rejects.toMatchObject({ code: 'WAREHOUSE_MISMATCH' });
+    test('rejects a save for an unknown/inactive warehouse', async () => {
+        await expect(service.saveAsync({ whsCode: 'NOPE', mode: 'STORE', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }] }, {}))
+            .rejects.toMatchObject({ code: 'INVALID_WAREHOUSE' });
         expect(repository.insertTransaction).not.toHaveBeenCalled();
     });
 
@@ -232,12 +229,14 @@ describe('saveAsync — store', () => {
             items: [{ itemQr: TAG_QR }, { itemQr: TAG_QR_2 }]
         }, { UserName: 'op' });
 
-        expect(repository.insertRackStockRow).toHaveBeenCalledWith({}, expect.objectContaining({ locationId: 5, itemCode: 'ITM-1', quantity: 5, createdBy: 'op' }));
+        expect(repository.lockRack).toHaveBeenCalledWith({}, 'WH1', 'WH1-A-005');
+        expect(repository.lockRackStockRow).toHaveBeenCalledWith({}, 'WH1', 'WH1-A-005', 'ITM-1');
+        expect(repository.insertRackStockRow).toHaveBeenCalledWith({}, expect.objectContaining({ warehouseCode: 'WH1', locationCode: 'WH1-A-005', itemCode: 'ITM-1', quantity: 5, createdBy: 'op' }));
         expect(repository.insertTransaction).toHaveBeenCalledWith({}, expect.objectContaining({
-            transactionType: 'STORE', locationId: 5, totalLines: 2, totalQty: 5, clientRequestId: 'r1', deviceId: 'HHT-1', createdBy: 'op'
+            transactionType: 'STORE', warehouseCode: 'WH1', locationCode: 'WH1-A-005', totalLines: 2, totalQty: 5, clientRequestId: 'r1', deviceId: 'HHT-1', createdBy: 'op'
         }));
         expect(repository.upsertTag).toHaveBeenCalledTimes(2);
-        expect(repository.upsertTag).toHaveBeenCalledWith({}, expect.objectContaining({ uniqueNumber: '0001', status: 'STORED', locationId: 5 }));
+        expect(repository.upsertTag).toHaveBeenCalledWith({}, expect.objectContaining({ uniqueNumber: '0001', status: 'STORED', warehouseCode: 'WH1', locationCode: 'WH1-A-005' }));
         expect(result.items.map(i => [i.qtyBefore, i.qtyAfter])).toEqual([[0, 2], [2, 5]]);
         expect(result).toMatchObject({ mode: 'STORE', transactionNo: 'RS00000900', totalQty: 5, duplicate: false });
     });
@@ -250,24 +249,23 @@ describe('saveAsync — store', () => {
     });
 
     test('rejects (and rolls back) when a label was stored by someone else in the meantime', async () => {
-        repository.lockTag.mockResolvedValue({ Status: 'STORED', LocationID: 6, LocationCode: 'WH1-A-006' });
+        repository.lockTag.mockResolvedValue({ Status: 'STORED', WarehouseCode: 'WH1', LocationCode: 'WH1-A-006' });
         await expect(service.saveAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }] }, {}))
             .rejects.toMatchObject({ code: 'TAG_ALREADY_STORED' });
         expect(repository.insertTransactionDetail).not.toHaveBeenCalled();
     });
 
-    test('rejects a rack deactivated after it was scanned', async () => {
-        locationRepository.lockLocationByCode.mockResolvedValue({ ...RACK, Status: 'INACTIVE' });
-        await expect(service.saveAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }] }, {}))
-            .rejects.toMatchObject({ code: 'RACK_INACTIVE' });
-        expect(repository.insertTransaction).not.toHaveBeenCalled();
+    test('stores into a brand-new rack (first store creates its inventory)', async () => {
+        const result = await service.saveAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'thdw-a01', items: [{ itemCode: 'ITM-1', qty: 4 }] }, { UserName: 'op' });
+        expect(repository.insertRackStockRow).toHaveBeenCalledWith({}, expect.objectContaining({ warehouseCode: 'WH1', locationCode: 'THDW-A01', quantity: 4 }));
+        expect(result).toMatchObject({ rackCode: 'THDW-A01', warehouseCode: 'WH1', totalQty: 4 });
     });
 });
 
 describe('saveAsync — pick', () => {
     test('deducts stock and marks labels PICKED', async () => {
         repository.lockRackStockRow.mockResolvedValue({ RackInventoryID: 11, Quantity: 10 });
-        repository.lockTag.mockResolvedValue({ Status: 'STORED', LocationID: 5, LocationCode: 'WH1-A-005' });
+        repository.lockTag.mockResolvedValue({ Status: 'STORED', WarehouseCode: 'WH1', LocationCode: 'WH1-A-005' });
 
         const result = await service.saveAsync({ whsCode: 'WH1', mode: 'PICK', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }, { itemCode: 'ITM-1', qty: 1 }] }, { UserName: 'op' });
 
@@ -291,7 +289,14 @@ describe('saveAsync — pick', () => {
 
     test('rejects a label that belongs to another rack', async () => {
         repository.lockRackStockRow.mockResolvedValue({ RackInventoryID: 11, Quantity: 10 });
-        repository.lockTag.mockResolvedValue({ Status: 'STORED', LocationID: OTHER_RACK.LocationID, LocationCode: OTHER_RACK.LocationCode });
+        repository.lockTag.mockResolvedValue({ Status: 'STORED', WarehouseCode: OTHER_RACK.WarehouseCode, LocationCode: OTHER_RACK.LocationCode });
+        await expect(service.saveAsync({ whsCode: 'WH1', mode: 'PICK', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }] }, {}))
+            .rejects.toMatchObject({ code: 'ITEM_NOT_IN_RACK' });
+    });
+
+    test('rejects a label stored in the same rack code of another warehouse', async () => {
+        repository.lockRackStockRow.mockResolvedValue({ RackInventoryID: 11, Quantity: 10 });
+        repository.lockTag.mockResolvedValue({ Status: 'STORED', WarehouseCode: 'WH2', LocationCode: 'WH1-A-005' });
         await expect(service.saveAsync({ whsCode: 'WH1', mode: 'PICK', rackCode: 'WH1-A-005', items: [{ itemQr: TAG_QR }] }, {}))
             .rejects.toMatchObject({ code: 'ITEM_NOT_IN_RACK' });
     });

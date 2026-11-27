@@ -15,6 +15,7 @@ const ERROR_STATUS = {
     BOX_ALREADY_COMPLETED: 409,
     BOX_WAREHOUSE_MISMATCH: 409,
     BOX_ITEMGROUP_MISMATCH: 409,
+    BOX_ALREADY_MAPPED: 409,
     DUPLICATE_ITEM_UNIQUE_NUMBER: 409
 };
 
@@ -105,11 +106,23 @@ const completeBox = async (req, res) => {
     }
 };
 
+const deleteBox = async (req, res) => {
+    try {
+        const data = await service.deleteBoxAsync(req.body, req.user);
+        logScanOutcome(req, 'DELETE_BOX', 'SUCCESS', { previousStatus: data.previousStatus, totalQty: data.totalQty });
+        return res.status(200).json({ success: true, message: 'Box deleted successfully', data });
+    } catch (error) {
+        logScanOutcome(req, 'DELETE_BOX', 'REJECTED', { validationCode: error.code });
+        return handleError(res, error);
+    }
+};
+
 module.exports = {
     getWarehouses,
     getWarehouseStock,
     validateBox,
     scanItem,
     getBoxItems,
-    completeBox
+    completeBox,
+    deleteBox
 };

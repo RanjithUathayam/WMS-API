@@ -402,6 +402,59 @@ async function syncBinningQty(transaction, grnNo, itemCode) {
     });
 }
 
+/**
+ * Pallet-mapping lookup for box deletion. Deliberately a normal (locking, READ COMMITTED) read,
+ * not NOLOCK: pallet mapping locks the same T_PREBIN_BOX row before inserting into
+ * T_PALLET_MAPPING_BOX, so once the caller holds that box lock this read sees every committed mapping.
+ */
+async function findPalletMappingForBox(transaction, boxNumber) {
+    const rows = await sequelize.query(`
+        SELECT TOP 1 PalletMappingBoxID, PalletID, BoxNumber
+        FROM T_PALLET_MAPPING_BOX WITH (UPDLOCK, HOLDLOCK)
+        WHERE BoxNumber = :boxNumber
+    `, {
+        replacements: { boxNumber },
+        transaction,
+        type: QueryTypes.SELECT
+    });
+    return rows[0] || null;
+}
+
+/** Distinct GRNNo + ItemCode pairs this box wrote into T_BIN_COMPLETE (scoped by WhsCode so legacy BinID rows are untouched). */
+async function getBinCompleteKeysForBox(transaction, whsCode, boxNumber) {
+    return sequelize.query(`
+        SELECT DISTINCT GRNNo, ItemCode
+        FROM T_BIN_COMPLETE WITH (UPDLOCK, HOLDLOCK)
+        WHERE BinID = :boxNumber AND WhsCode = :whsCode
+    `, {
+        replacements: { boxNumber, whsCode },
+        transaction,
+        type: QueryTypes.SELECT
+    });
+}
+
+async function deleteBinCompleteRowsForBox(transaction, whsCode, boxNumber) {
+    await sequelize.query(`
+        DELETE FROM T_BIN_COMPLETE WHERE BinID = :boxNumber AND WhsCode = :whsCode
+    `, {
+        replacements: { boxNumber, whsCode },
+        transaction,
+        type: QueryTypes.DELETE
+    });
+}
+
+/** Removes the box and every scanned item in it (items first — FK_PREBIN_ITEM_BOX has no cascade). */
+async function deleteBoxWithItems(transaction, preBinBoxID) {
+    await sequelize.query(`
+        DELETE FROM T_PREBIN_ITEM WHERE PreBinBoxID = :preBinBoxID;
+        DELETE FROM T_PREBIN_BOX WHERE PreBinBoxID = :preBinBoxID;
+    `, {
+        replacements: { preBinBoxID },
+        transaction,
+        type: QueryTypes.DELETE
+    });
+}
+
 module.exports = {
     getPreBinningWarehouses,
     isWarehouseAllowed,
@@ -422,5 +475,9 @@ module.exports = {
     getItemNamesByCode,
     completeBox,
     insertBinCompleteRow,
-    syncBinningQty
+    syncBinningQty,
+    findPalletMappingForBox,
+    getBinCompleteKeysForBox,
+    deleteBinCompleteRowsForBox,
+    deleteBoxWithItems
 };

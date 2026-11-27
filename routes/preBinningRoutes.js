@@ -8,5 +8,6 @@ router.post('/box/validate', preBinningController.validateBox);
 router.post('/item/scan', preBinningController.scanItem);
 router.get('/box/:boxNumber/items', preBinningController.getBoxItems);
 router.post('/box/complete', preBinningController.completeBox);
+router.post('/box/delete', preBinningController.deleteBox);
 
 module.exports = router;
