@@ -319,3 +319,38 @@ describe('history', () => {
         await expect(service.getHistoryAsync('5')).rejects.toMatchObject({ code: 'TRANSACTION_NOT_FOUND' });
     });
 });
+
+describe('label identity = ItemType + GRNNo + UniqueNumber', () => {
+    const PO_QR = 'ITM-1|PO|2402|GRP|12|5';
+    const ST_QR = 'ITM-1|ST|2402|GRP|12|5';
+
+    test('scan item looks the label up by ItemType/GRNNo/UniqueNumber', async () => {
+        await service.scanItemAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'R1', itemQr: PO_QR });
+        expect(repository.findTag).toHaveBeenCalledWith(expect.objectContaining({ itemType: 'PO', grnNo: '2402', uniqueNumber: '12' }));
+    });
+
+    test('scan item rejects a label already stored in another rack at scan time', async () => {
+        repository.findTag.mockResolvedValue({ ItemType: 'PO', ItemCode: 'ITM-1', Status: 'STORED', WarehouseCode: 'WH1', LocationCode: '01091991' });
+        await expect(service.scanItemAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: '01091981', itemQr: PO_QR }))
+            .rejects.toMatchObject({ code: 'TAG_ALREADY_STORED', message: expect.stringContaining('01091991') });
+    });
+
+    test('the same GRN/unique number with a different type is a different label in one save', async () => {
+        await service.saveAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'R1', items: [{ itemQr: PO_QR }, { itemQr: ST_QR }] }, { UserName: 'op' });
+        expect(repository.upsertTag).toHaveBeenCalledTimes(2);
+        expect(repository.upsertTag).toHaveBeenCalledWith({}, expect.objectContaining({ itemType: 'PO', grnNo: '2402', uniqueNumber: '12' }));
+        expect(repository.upsertTag).toHaveBeenCalledWith({}, expect.objectContaining({ itemType: 'ST', grnNo: '2402', uniqueNumber: '12' }));
+    });
+
+    test('the same ItemType/GRN/unique scanned twice in one save is a duplicate', async () => {
+        await expect(service.saveAsync({ whsCode: 'WH1', mode: 'STORE', rackCode: 'R1', items: [{ itemQr: PO_QR }, { itemQr: 'ITM-1|po|2402|GRP|12|5' }] }, {}))
+            .rejects.toMatchObject({ code: 'DUPLICATE_SCAN' });
+    });
+
+    test('pick rejects a label that was stored as a different item', async () => {
+        repository.findRackStockRow.mockResolvedValue({ RackInventoryID: 1, Quantity: 10 });
+        repository.findTag.mockResolvedValue({ ItemType: 'PO', ItemCode: 'OTHER', Status: 'STORED', WarehouseCode: 'WH1', LocationCode: 'R1' });
+        await expect(service.scanItemAsync({ whsCode: 'WH1', mode: 'PICK', rackCode: 'R1', itemQr: PO_QR }))
+            .rejects.toMatchObject({ code: 'ITEM_NOT_IN_RACK' });
+    });
+});

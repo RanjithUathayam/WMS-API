@@ -170,45 +170,46 @@ async function setRackStockQty(transaction, rackInventoryId, { quantity, itemGro
  * Labelled pieces (T_RACK_ITEM_TAG)
  * ---------------------------------------------------------------------------------------------- */
 
-async function findTag({ itemCode, grnNo, uniqueNumber }) {
+/** A labelled piece is identified by ItemType + GRNNo + UniqueNumber (see sql/RackManagement_TagKey_Migration.sql). */
+async function findTag({ itemType, grnNo, uniqueNumber }) {
     const rows = await sequelize.query(`
-        SELECT ItemCode, GRNNo, UniqueNumber, Status, WarehouseCode, LocationCode, Qty, LastTransactionID
+        SELECT ItemType, ItemCode, GRNNo, UniqueNumber, Status, WarehouseCode, LocationCode, Qty, LastTransactionID
         FROM T_RACK_ITEM_TAG WITH (NOLOCK)
-        WHERE ItemCode = :itemCode AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
+        WHERE ItemType = :itemType AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
     `, {
-        replacements: { itemCode, grnNo, uniqueNumber },
+        replacements: { itemType, grnNo, uniqueNumber },
         type: QueryTypes.SELECT
     });
     return rows[0] || null;
 }
 
 /** Locks a tag's state row (or, with HOLDLOCK, the key range where it would be inserted). */
-async function lockTag(transaction, { itemCode, grnNo, uniqueNumber }) {
+async function lockTag(transaction, { itemType, grnNo, uniqueNumber }) {
     const rows = await sequelize.query(`
-        SELECT ItemCode, GRNNo, UniqueNumber, Status, WarehouseCode, LocationCode, Qty, LastTransactionID
+        SELECT ItemType, ItemCode, GRNNo, UniqueNumber, Status, WarehouseCode, LocationCode, Qty, LastTransactionID
         FROM T_RACK_ITEM_TAG WITH (UPDLOCK, ROWLOCK, HOLDLOCK)
-        WHERE ItemCode = :itemCode AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
+        WHERE ItemType = :itemType AND GRNNo = :grnNo AND UniqueNumber = :uniqueNumber
     `, {
-        replacements: { itemCode, grnNo, uniqueNumber },
+        replacements: { itemType, grnNo, uniqueNumber },
         transaction,
         type: QueryTypes.SELECT
     });
     return rows[0] || null;
 }
 
-async function upsertTag(transaction, { itemCode, grnNo, uniqueNumber, status, warehouseCode, locationCode, qty, transactionId, updatedBy }) {
+async function upsertTag(transaction, { itemType, itemCode, grnNo, uniqueNumber, status, warehouseCode, locationCode, qty, transactionId, updatedBy }) {
     await sequelize.query(`
         MERGE T_RACK_ITEM_TAG WITH (HOLDLOCK) AS target
-        USING (SELECT :itemCode AS ItemCode, :grnNo AS GRNNo, :uniqueNumber AS UniqueNumber) AS src
-            ON target.ItemCode = src.ItemCode AND target.GRNNo = src.GRNNo AND target.UniqueNumber = src.UniqueNumber
+        USING (SELECT :itemType AS ItemType, :grnNo AS GRNNo, :uniqueNumber AS UniqueNumber) AS src
+            ON target.ItemType = src.ItemType AND target.GRNNo = src.GRNNo AND target.UniqueNumber = src.UniqueNumber
         WHEN MATCHED THEN
-            UPDATE SET Status = :status, LocationID = NULL, WarehouseCode = :warehouseCode, LocationCode = :locationCode, Qty = :qty,
+            UPDATE SET ItemCode = :itemCode, Status = :status, LocationID = NULL, WarehouseCode = :warehouseCode, LocationCode = :locationCode, Qty = :qty,
                        LastTransactionID = :transactionId, UpdatedBy = :updatedBy, UpdatedAt = GETDATE()
         WHEN NOT MATCHED THEN
-            INSERT (ItemCode, GRNNo, UniqueNumber, Status, LocationID, WarehouseCode, LocationCode, Qty, LastTransactionID, UpdatedBy, UpdatedAt)
-            VALUES (:itemCode, :grnNo, :uniqueNumber, :status, NULL, :warehouseCode, :locationCode, :qty, :transactionId, :updatedBy, GETDATE());
+            INSERT (ItemType, ItemCode, GRNNo, UniqueNumber, Status, LocationID, WarehouseCode, LocationCode, Qty, LastTransactionID, UpdatedBy, UpdatedAt)
+            VALUES (:itemType, :itemCode, :grnNo, :uniqueNumber, :status, NULL, :warehouseCode, :locationCode, :qty, :transactionId, :updatedBy, GETDATE());
     `, {
-        replacements: { itemCode, grnNo, uniqueNumber, status, warehouseCode, locationCode, qty, transactionId, updatedBy },
+        replacements: { itemType, itemCode, grnNo, uniqueNumber, status, warehouseCode, locationCode, qty, transactionId, updatedBy },
         transaction,
         type: QueryTypes.INSERT
     });

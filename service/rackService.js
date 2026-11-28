@@ -84,8 +84,13 @@ function readQty(value, label) {
     return qty;
 }
 
+/** Identity of a labelled piece: ItemType + GRNNo + UniqueNumber (GRN numbers are per type, e.g. PO vs ST). */
 function tagKey(line) {
-    return `${line.itemCode}|${line.grnNo}|${line.uniqueNumber}`.toUpperCase();
+    return `${line.itemType}|${line.grnNo}|${line.uniqueNumber}`.toUpperCase();
+}
+
+function tagLabel(line) {
+    return `${line.itemCode} / ${line.itemType} / GRN ${line.grnNo} / #${line.uniqueNumber}`;
 }
 
 /**
@@ -120,11 +125,16 @@ function parseItemScan(rawQr) {
 /** Tag state rules shared by Scan Item (read-only pre-check) and Save (authoritative, under lock). */
 function assertTagAllowed(mode, tag, line, rack) {
     if (!tag) return;
-    const label = `${line.itemCode} / GRN ${line.grnNo} / #${line.uniqueNumber}`;
+    const label = tagLabel(line);
     if (mode === 'STORE' && tag.Status === 'STORED') {
-        throw new RackError('TAG_ALREADY_STORED', `Item ${label} is already stored in rack ${tag.LocationCode}.`);
+        const where = tag.WarehouseCode ? `${tag.LocationCode} (${tag.WarehouseCode})` : tag.LocationCode;
+        throw new RackError('TAG_ALREADY_STORED', `Item ${label} is already stored in rack ${where}.`,
+            { itemType: line.itemType, grnNo: line.grnNo, uniqueNumber: line.uniqueNumber, rackCode: tag.LocationCode, warehouseCode: tag.WarehouseCode || null });
     }
     if (mode === 'PICK') {
+        if (tag.ItemCode && !sameCode(tag.ItemCode, line.itemCode)) {
+            throw new RackError('ITEM_NOT_IN_RACK', `Label ${line.itemType} / GRN ${line.grnNo} / #${line.uniqueNumber} was stored as item ${tag.ItemCode}, not ${line.itemCode}.`);
+        }
         if (tag.Status === 'PICKED') {
             throw new RackError('TAG_ALREADY_PICKED', `Item ${label} has already been picked from rack ${tag.LocationCode}.`);
         }
@@ -297,7 +307,7 @@ function parseSaveLines(rawItems) {
             line = parseItemScan(raw.itemQr);
             const key = tagKey(line);
             if (seenTags.has(key)) {
-                throw new RackError('DUPLICATE_SCAN', `Item ${line.itemCode} / GRN ${line.grnNo} / #${line.uniqueNumber} is scanned more than once.`);
+                throw new RackError('DUPLICATE_SCAN', `Item ${tagLabel(line)} is scanned more than once.`);
             }
             seenTags.add(key);
         } else {
@@ -419,7 +429,7 @@ async function saveAsync(body, user) {
                 const tag = await repository.lockTag(transaction, line);
                 assertTagAllowed(req.mode, tag, line, rack);
                 await repository.upsertTag(transaction, {
-                    itemCode: line.itemCode, grnNo: line.grnNo, uniqueNumber: line.uniqueNumber,
+                    itemType: line.itemType, itemCode: line.itemCode, grnNo: line.grnNo, uniqueNumber: line.uniqueNumber,
                     status: req.mode === 'STORE' ? 'STORED' : 'PICKED',
                     warehouseCode: rack.WarehouseCode, locationCode: rack.LocationCode, qty: line.qty,
                     transactionId: header.RackTransactionID, updatedBy: createdBy
